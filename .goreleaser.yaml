@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/goreleaser/goreleaser/v2.18.0/www/static/schema.json
+version: 2
+project_name: skmr
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - id: skmr
+    main: ./cmd/skmr
+    binary: skmr
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.FullCommit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: skmr-archives
+    ids:
+      - skmr
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "{{ .ProjectName }}_checksums.txt"
+
+brews:
+  - name: skmr
+    ids:
+      - skmr-archives
+    repository:
+      owner: faizmokh
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    commit_author:
+      name: skmr_bot
+      email: me+bot@faizmokh.com
+    commit_msg_template: "chore: release {{ .ProjectName }} {{ .Tag }}"
+    homepage: https://github.com/faizmokh/skmr
+    description: Manage agent skills across Codex, OpenCode, and Pi
+    license: MIT
+    install: |
+      bin.install "skmr"
+    test: |
+      output = shell_output("#{bin}/skmr list --json")
+      assert_match '"skills": []', output
+
+changelog:
+  use: git
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

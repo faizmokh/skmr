@@ -1,0 +1,5 @@
+/bin/
+/dist/
+.skmr/.lock
+.skmr/journal.json
+.skmr/.skmr-write-*
