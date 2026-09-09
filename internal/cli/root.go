@@ -165,15 +165,15 @@ func New(build BuildInfo) *cobra.Command {
 		}
 		root.AddCommand(cmd)
 	}
-	for _, action := range []string{"adopt", "enable", "disable", "restore"} {
+	for _, action := range []string{"adopt", "resolve", "enable", "disable", "restore"} {
 		var yes, dry bool
 		arg := "<id>"
 		if action == "adopt" {
 			arg = "<path>"
 		}
-		cmd := &cobra.Command{Use: action + " " + arg, Short: map[string]string{"adopt": "Move an existing skill into the managed library", "enable": "Create shared discovery links for a managed skill", "disable": "Remove discovery links, keeping the library copy", "restore": "Return an adopted skill to its original location"}[action], Args: cobra.ExactArgs(1)}
+		cmd := &cobra.Command{Use: action + " " + arg, Short: map[string]string{"adopt": "Move an existing skill into the managed library", "resolve": "Choose the canonical copy of a conflicting skill", "enable": "Create shared discovery links for a managed skill", "disable": "Remove discovery links, keeping the library copy", "restore": "Return an adopted skill to its original location"}[action], Args: cobra.ExactArgs(1)}
 		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview changes without writing files")
-		if action == "adopt" || action == "restore" {
+		if action == "adopt" || action == "resolve" || action == "restore" {
 			cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the preview without prompting")
 		}
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -189,7 +189,7 @@ func New(build BuildInfo) *cobra.Command {
 			if dry {
 				return nil
 			}
-			if (action == "adopt" || action == "restore") && !yes {
+			if (action == "adopt" || action == "resolve" || action == "restore") && !yes {
 				if !isTerminal(cmd.InOrStdin()) {
 					return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
 				}
@@ -236,6 +236,9 @@ func status(s skills.Skill) string {
 		state += " / inherited"
 	} else if s.ReadOnly {
 		state += " / read-only"
+	}
+	if s.ConflictKind != "" {
+		state += " / conflict:" + s.ConflictKind
 	}
 	return state
 }

@@ -247,7 +247,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.message = "Reading skill directories…"
 			return m, m.load()
-		case "a", "e", "d", "r":
+		case "a", "c", "e", "d", "r":
 			item, ok := m.selected()
 			if !ok {
 				return m, nil
@@ -256,12 +256,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = "This skill is read-only in this scope. Switch scope or manage its original source."
 				return m, nil
 			}
-			action := map[string]string{"a": "adopt", "e": "enable", "d": "disable", "r": "restore"}[key]
+			action := map[string]string{"a": "adopt", "c": "resolve", "e": "enable", "d": "disable", "r": "restore"}[key]
+			if action == "resolve" && item.ConflictID == "" {
+				m.message = "This skill has no duplicate discovery conflict."
+				return m, nil
+			}
 			if action == "adopt" && item.Managed {
 				m.message = "This skill is already managed."
 				return m, nil
 			}
-			if action != "adopt" && !item.Managed {
+			if action != "adopt" && action != "resolve" && !item.Managed {
 				m.message = "Adopt this skill before changing its discovery links."
 				return m, nil
 			}
@@ -273,7 +277,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			return m, func() tea.Msg {
 				p, e := s.Preview(action, arg)
-				return previewMsg{p, e, action == "adopt" || action == "restore"}
+				return previewMsg{p, e, action == "adopt" || action == "resolve" || action == "restore"}
 			}
 		case "?":
 			m.showHelp = !m.showHelp

@@ -75,6 +75,15 @@ func (s *Service) List() (skills.Result, error) {
 			if !r.Enabled && len(item.Agents) > 0 {
 				item.Issues = append(item.Issues, "Disabled skill still has discovery links")
 			}
+			for _, origin := range r.Origins {
+				isLegacyLink := false
+				for _, link := range r.Links {
+					isLegacyLink = isLegacyLink || origin.Path == link && owned(link, r.Library)
+				}
+				if !isLegacyLink && !absent(origin.Path) {
+					item.Issues = append(item.Issues, "Restore path is occupied by unrelated content: "+origin.Path)
+				}
+			}
 			filtered := out.Skills[:0]
 			for _, found := range out.Skills {
 				managedLink := false
@@ -84,6 +93,9 @@ func (s *Service) List() (skills.Result, error) {
 					}
 				}
 				if !managedLink {
+					if found.Path == r.Original && found.ID == r.ID {
+						found.ID = skills.ID(found.Path + "#unmanaged")
+					}
 					filtered = append(filtered, found)
 				}
 			}
@@ -91,15 +103,7 @@ func (s *Service) List() (skills.Result, error) {
 			out.Skills = append(out.Skills, item)
 		}
 	}
-	counts := map[string]int{}
-	for _, item := range out.Skills {
-		counts[item.Name]++
-	}
-	for i := range out.Skills {
-		if counts[out.Skills[i].Name] > 1 {
-			out.Skills[i].Issues = append(out.Skills[i].Issues, "Duplicate name; another copy may remain discoverable")
-		}
-	}
+	annotateConflicts(&out, sets[0].m)
 	if !absent(filepath.Join(s.Store, "journal.json")) {
 		out.Issues = append(out.Issues, "Interrupted operation: run doctor --recover before making changes")
 	}
@@ -110,6 +114,65 @@ func (s *Service) List() (skills.Result, error) {
 		return out.Skills[i].Name < out.Skills[j].Name
 	})
 	return out, nil
+}
+
+func annotateConflicts(out *skills.Result, current Manifest) {
+	groups := map[string][]int{}
+	for i := range out.Skills {
+		groups[out.Skills[i].Name] = append(groups[out.Skills[i].Name], i)
+	}
+	for name, indexes := range groups {
+		legacyLinks := 0
+		for _, record := range current.Records {
+			if record.Name != name {
+				continue
+			}
+			for _, link := range record.Links {
+				if owned(link, record.Library) {
+					legacyLinks++
+				}
+			}
+		}
+		count := len(indexes)
+		if count < 2 && legacyLinks < 2 {
+			continue
+		}
+		kind := "identical"
+		digests := map[string]bool{}
+		unresolved := []string{}
+		for _, index := range indexes {
+			item := &out.Skills[index]
+			if item.ReadOnly || item.Inherited {
+				kind = "external"
+				unresolved = append(unresolved, item.Path)
+			}
+			digest, err := skills.Digest(item.Path)
+			if err != nil {
+				kind = "external"
+				unresolved = append(unresolved, item.Path)
+				continue
+			}
+			digests[digest] = true
+		}
+		if kind != "external" && len(digests) > 1 {
+			kind = "divergent"
+		}
+		visibleCount := max(count, legacyLinks)
+		groupID := skills.ID("conflict:" + name)
+		for _, index := range indexes {
+			item := &out.Skills[index]
+			item.ConflictID = groupID
+			item.ConflictKind = kind
+			item.ConflictCount = visibleCount
+			item.Canonical = item.Managed
+			item.Unresolved = unique(unresolved)
+			message := fmt.Sprintf("%s conflict across %d discovery paths", strings.ToUpper(kind[:1])+kind[1:], visibleCount)
+			if legacyLinks >= 2 && count == 1 {
+				message = "Identical conflict from redundant managed discovery links; resolve to keep only the shared path"
+			}
+			item.Issues = append(item.Issues, message)
+		}
+	}
 }
 func unique(xs []string) []string {
 	sort.Strings(xs)
@@ -188,18 +251,21 @@ func (s *Service) adoption(path string, m Manifest) (Record, error) {
 	if len(item.Issues) > 0 {
 		return Record{}, fmt.Errorf("cannot adopt: %s", strings.Join(item.Issues, "; "))
 	}
+	for _, discovered := range skills.Scan(s.Roots).Skills {
+		if discovered.Name == item.Name && discovered.Path != p {
+			return Record{}, fmt.Errorf("duplicate skill name; use resolve %s to choose this copy as canonical", item.ID)
+		}
+	}
 	for _, r := range m.Records {
 		if r.Name == item.Name || r.Original == p {
 			return Record{}, fmt.Errorf("skill already managed: %s", r.ID)
 		}
 	}
-	r := Record{ID: item.ID, Name: item.Name, Original: p, Library: filepath.Join(s.Store, "library", item.ID, item.Name), Enabled: true, Links: []string{p}}
+	r := Record{ID: item.ID, Name: item.Name, Original: p, Library: filepath.Join(s.Store, "library", item.ID, item.Name), Enabled: true, Origins: []Origin{{Path: p, Canonical: true}}}
 	shared := filepath.Join(s.Shared(), item.Name)
-	if p != shared {
-		r.Links = append(r.Links, shared)
-		if err = available(shared); err != nil {
-			return Record{}, err
-		}
+	r.Links = []string{shared}
+	if err = available(shared); err != nil && shared != p {
+		return Record{}, err
 	}
 	if err = available(r.Library); err != nil {
 		return Record{}, err
@@ -207,32 +273,211 @@ func (s *Service) adoption(path string, m Manifest) (Record, error) {
 	if err = sameDevice(p, r.Library); err != nil {
 		return Record{}, err
 	}
+	if err = validateRelocation(p); err != nil {
+		return Record{}, err
+	}
+	return r, s.validate(r)
+}
+
+func validateRelocation(path string) error {
 	// Rename preserves bytes and modes. Refuse relocation when relative links would
 	// escape the package, or absolute internal links would break while disabled.
-	err = filepath.WalkDir(p, func(path string, d os.DirEntry, e error) error {
+	return filepath.WalkDir(path, func(current string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
 		}
 		if d.Type()&os.ModeSymlink == 0 {
 			return nil
 		}
-		target, e := os.Readlink(path)
+		target, e := os.Readlink(current)
 		if e != nil {
 			return e
 		}
 		if filepath.IsAbs(target) {
-			if within(p, target) {
-				return fmt.Errorf("use a relative internal link before adoption: %s", path)
+			if within(path, target) {
+				return fmt.Errorf("use a relative internal link before relocation: %s", current)
 			}
 			return nil
 		}
-		if !within(p, filepath.Clean(filepath.Join(filepath.Dir(path), target))) {
-			return fmt.Errorf("relative link escapes skill folder: %s", path)
+		if !within(path, filepath.Clean(filepath.Join(filepath.Dir(current), target))) {
+			return fmt.Errorf("relative link escapes skill folder: %s", current)
 		}
 		return nil
 	})
+}
+
+func (s *Service) resolution(id string, manifest Manifest) (Plan, error) {
+	result, err := s.List()
 	if err != nil {
-		return Record{}, err
+		return Plan{}, err
 	}
-	return r, s.validate(r)
+	var selected *skills.Skill
+	for i := range result.Skills {
+		if result.Skills[i].ID == id {
+			selected = &result.Skills[i]
+			break
+		}
+	}
+	if selected == nil {
+		return Plan{}, fmt.Errorf("skill %q was not found; resolve requires an ID", id)
+	}
+	if selected.ReadOnly || selected.Inherited {
+		return Plan{}, fmt.Errorf("canonical skill must be writable in the current scope")
+	}
+	if selected.ConflictID == "" {
+		return Plan{}, fmt.Errorf("skill %q has no duplicate discovery conflict", selected.Name)
+	}
+	if !selected.Managed {
+		parsed := skills.Parse(selected.Path)
+		if len(parsed.Issues) > 0 {
+			return Plan{}, fmt.Errorf("canonical skill is invalid: %s", strings.Join(parsed.Issues, "; "))
+		}
+		if err = validateRelocation(selected.Path); err != nil {
+			return Plan{}, err
+		}
+	}
+
+	plan := Plan{Version: Version, Action: "resolve", Before: manifest}
+	for _, item := range result.Skills {
+		if item.Name != selected.Name || item.ID == selected.ID || item.ReadOnly || item.Inherited {
+			continue
+		}
+		differences, compareErr := skills.Differences(selected.Path, item.Path)
+		if compareErr != nil {
+			return Plan{}, compareErr
+		}
+		const comparisonLimit = 200
+		if len(differences) > comparisonLimit {
+			remainder := len(differences) - comparisonLimit
+			differences = append(differences[:comparisonLimit], fmt.Sprintf("... %d more differences", remainder))
+		}
+		plan.Comparisons = append(plan.Comparisons, Comparison{Path: item.Path, Differences: differences})
+	}
+	var existing *Record
+	for i := range manifest.Records {
+		if manifest.Records[i].Name == selected.Name {
+			copy := manifest.Records[i]
+			existing = &copy
+			break
+		}
+	}
+
+	shared := filepath.Join(s.Shared(), selected.Name)
+	if selected.Managed {
+		if existing == nil || existing.ID != selected.ID {
+			return Plan{}, fmt.Errorf("managed canonical record is missing")
+		}
+		plan.Record = *existing
+		plan.Record.Origins = append([]Origin{}, existing.Origins...)
+	} else {
+		plan.Record = Record{
+			ID:       selected.ID,
+			Name:     selected.Name,
+			Original: selected.Path,
+			Library:  filepath.Join(s.Store, "library", selected.ID, selected.Name),
+			Enabled:  true,
+			Origins:  []Origin{{Path: selected.Path, Canonical: true}},
+		}
+		if err = available(plan.Record.Library); err != nil {
+			return Plan{}, err
+		}
+		if err = sameDevice(selected.Path, plan.Record.Library); err != nil {
+			return Plan{}, err
+		}
+		selectedMove, moveErr := newMovePlan(selected.Path, plan.Record.Library)
+		if moveErr != nil {
+			return Plan{}, moveErr
+		}
+		plan.Identity = selectedMove.Identity
+		plan.Moves = append(plan.Moves, selectedMove)
+		if existing != nil {
+			for _, link := range existing.Links {
+				plan.RemoveLinks = append(plan.RemoveLinks, LinkPlan{Path: link, Target: existing.Library})
+			}
+			for _, origin := range existing.Origins {
+				if origin.Path == selected.Path {
+					return Plan{}, fmt.Errorf("duplicate occupies a reserved restore path; move it before resolving: %s", selected.Path)
+				}
+				source := origin.Backup
+				if origin.Canonical {
+					source = existing.Library
+				}
+				backup := filepath.Join(s.Store, "library", plan.Record.ID, ".skmr-duplicates", skills.ID(origin.Path), existing.Name)
+				if err = available(backup); err != nil {
+					return Plan{}, err
+				}
+				if err = sameDevice(source, backup); err != nil {
+					return Plan{}, err
+				}
+				oldMove, moveErr := newMovePlan(source, backup)
+				if moveErr != nil {
+					return Plan{}, moveErr
+				}
+				plan.Moves = append(plan.Moves, oldMove)
+				origin.Canonical = false
+				origin.Backup = backup
+				plan.Record.Origins = append(plan.Record.Origins, origin)
+			}
+		}
+	}
+
+	knownOrigins := map[string]bool{}
+	for _, origin := range plan.Record.Origins {
+		knownOrigins[origin.Path] = true
+	}
+	for _, item := range result.Skills {
+		if item.Name != selected.Name || item.ID == selected.ID || item.Managed || item.ReadOnly || item.Inherited {
+			continue
+		}
+		if knownOrigins[item.Path] {
+			return Plan{}, fmt.Errorf("duplicate occupies a reserved restore path; move it before resolving: %s", item.Path)
+		}
+		stat, statErr := os.Lstat(item.Path)
+		if statErr != nil {
+			return Plan{}, statErr
+		}
+		if !stat.IsDir() || stat.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		backup := filepath.Join(s.Store, "library", plan.Record.ID, ".skmr-duplicates", item.ID, item.Name)
+		if err = available(backup); err != nil {
+			return Plan{}, err
+		}
+		if err = sameDevice(item.Path, backup); err != nil {
+			return Plan{}, err
+		}
+		duplicateMove, moveErr := newMovePlan(item.Path, backup)
+		if moveErr != nil {
+			return Plan{}, moveErr
+		}
+		plan.Record.Origins = append(plan.Record.Origins, Origin{Path: item.Path, Backup: backup})
+		plan.Moves = append(plan.Moves, duplicateMove)
+		knownOrigins[item.Path] = true
+	}
+
+	if selected.Managed && existing != nil {
+		for _, link := range existing.Links {
+			if link != shared {
+				plan.RemoveLinks = append(plan.RemoveLinks, LinkPlan{Path: link, Target: existing.Library})
+			}
+		}
+	}
+	plan.Record.Links = []string{shared}
+	plan.Record.Enabled = true
+	if selected.Managed && len(plan.Moves) == 0 && len(plan.RemoveLinks) == 0 {
+		return Plan{}, fmt.Errorf("only read-only or inherited duplicates remain; skmr cannot suppress them")
+	}
+
+	sharedWillMove := false
+	for _, item := range plan.Moves {
+		sharedWillMove = sharedWillMove || item.From == shared
+	}
+	sharedOwned := existing != nil && owned(shared, existing.Library)
+	if !absent(shared) && !sharedWillMove && !sharedOwned && !owned(shared, plan.Record.Library) {
+		return Plan{}, fmt.Errorf("destination already exists: %s", shared)
+	}
+	if err = s.validate(plan.Record); err != nil {
+		return Plan{}, err
+	}
+	return plan, nil
 }

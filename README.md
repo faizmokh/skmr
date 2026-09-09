@@ -37,14 +37,15 @@ skmr list
 skmr show <id>
 skmr adopt ~/.codex/skills/my-skill --dry-run
 skmr adopt ~/.codex/skills/my-skill
+skmr resolve <id>
 skmr disable <id>
 skmr enable <id>
 skmr restore <id>
 ```
 
-`adopt` and `restore` print their exact move/link changes and ask for confirmation. Use `--yes` after reviewing the preview in scripts. `enable` and `disable` apply directly. All four support `--dry-run`, which creates no directories or state.
+`adopt`, `resolve`, and `restore` print their exact move/link changes and ask for confirmation. Use `--yes` after reviewing the preview in scripts. `enable` and `disable` apply directly. All five support `--dry-run`, which creates no directories or state.
 
-Use an ID from `list`, or an unambiguous skill name. Adoption takes the path to the containing folder, not to `SKILL.md`. V1 adopts existing folders from standard discovery directories; it does not import arbitrary folders, fetch repositories, edit skills, or manage plugin lifecycles.
+Use an ID from `list`, or an unambiguous skill name. Adoption takes the path to the containing folder, not to `SKILL.md`. skmr adopts existing folders from standard discovery directories; it does not import arbitrary folders, fetch repositories, edit skills, or manage plugin lifecycles.
 
 ### Scopes
 
@@ -66,13 +67,20 @@ An explicit project directory is required outside Git. Project views include glo
 | `list [--json]` | Inventory, IDs, agent visibility, scope, and problems |
 | `show <id> [--json]` | Metadata, source path, and skill instructions |
 | `adopt <path> [--yes]` | Move a discovered skill into the library |
-| `enable <id>` | Create shared and original discovery links |
+| `resolve <id> [--yes]` | Choose a canonical duplicate and suppress writable copies |
+| `enable <id>` | Create the shared discovery link |
 | `disable <id>` | Remove owned discovery links; keep library content |
 | `restore <id> [--yes]` | Move content back and stop managing it |
 | `doctor [--json]` | Diagnose invalid skills, broken links, duplicates, and recovery needs |
 | `doctor --recover` | Resume an interrupted operation, then diagnose |
 | `tui` | Open the interactive library |
 | `version` | Show version, commit, and build date |
+
+### Duplicate conflicts
+
+Skills with the same name form a conflict group. `identical` means their complete package trees match, `divergent` means at least one file, permission, or symlink target differs, and `external` means a read-only, inherited, symlinked, or unreadable copy cannot be consolidated automatically.
+
+Select the copy you want to keep and run `skmr resolve <id> --dry-run`. After review, rerun with `--yes`. skmr moves writable alternatives into tracked backup storage and leaves only `.agents/skills/<name>` discoverable. Restoring the managed skill returns every preserved copy to its original path.
 
 Read commands produce JSON only on stdout with `--json`. Human-readable errors go to stderr. Exit status is `0` for success (including cancellation) and `1` for errors; `doctor` also returns `1` when problems are found. JSON skill content is escaped JSON; human-readable output strips terminal control sequences.
 
@@ -84,7 +92,7 @@ Read commands produce JSON only on stdout with `--json`. Human-readable errors g
 | `/`, `Enter`, `Esc` | Start search, finish editing, clear search |
 | `Tab` | Switch global/project scope (uses nearest Git root if no project was supplied) |
 | `f`, `1`–`4` | Cycle or directly select all, managed, discovered, or inherited skills |
-| `a`, `e`, `d`, `r` | Adopt, enable, disable, restore |
+| `a`, `c`, `e`, `d`, `r` | Adopt, resolve conflict, enable, disable, restore |
 | `y`, `n` / `Esc` | Apply or cancel a change preview |
 | `PgUp` / `PgDn` | Scroll instructions or the change preview |
 | `R`, `?`, `q` | Refresh, toggle help, quit |
@@ -99,15 +107,16 @@ Global storage:
 $XDG_DATA_HOME/skmr/              # default: ~/.local/share/skmr
   manifest.json                  # versioned ownership records
   library/<id>/<name>/            # complete original skill folder
+  library/<id>/.skmr-duplicates/  # preserved non-canonical copies
   .lock                          # advisory process lock
   journal.json                   # present only during an unfinished operation
 ```
 
 Project storage uses `<project>/.skmr/` with the same layout. Project manifests and discovery symlinks use relative paths, so a completed installation can move with its repository. To share a project installation, commit the library, manifest, and discovery symlinks together; keep `.skmr/.lock`, `.skmr/journal.json`, and `.skmr/.skmr-write-*` out of Git. Do not move a project while an operation is pending recovery.
 
-Adoption moves the complete folder into the library and replaces its original path with a managed symlink. It also creates a shared `.agents/skills/<name>` link when the original location differs. Disable removes those links; restoration moves the folder back, including for disabled skills. Restoration retains all edits made while the skill was managed. Unrecorded links and files are never deleted or overwritten.
+Adoption moves the complete folder into the library and exposes it through one managed `.agents/skills/<name>` link. Resolve chooses one duplicate as canonical, moves other writable copies into tracked backup storage, and uses the same shared link. Disable removes that link; restoration returns every preserved copy to its exact original path. Restoration retains all edits made while a skill was managed. Unrecorded links and files are never deleted or overwritten.
 
-V1 uses filesystem rename to preserve contents, permissions, and internal relative symlinks. Source and library must be on the same filesystem; choose `XDG_DATA_HOME` accordingly. Relative links escaping the package and absolute links back into the package must be corrected before adoption. Existing symlinked skills, built-in `.system` skills, plugin-cache skills, and inherited entries are read-only. Symlinked parent directories are rejected for writes.
+skmr uses filesystem rename to preserve contents, permissions, and internal relative symlinks. Source and library must be on the same filesystem; choose `XDG_DATA_HOME` accordingly. Relative links escaping the package and absolute links back into the package must be corrected before adoption. Existing symlinked skills, built-in `.system` skills, plugin-cache skills, and inherited entries are read-only. Symlinked parent directories are rejected for writes.
 
 ### Recovery
 
@@ -133,7 +142,7 @@ Recovery resumes the journaled operation; it does not roll it back. It verifies 
 | `~/.claude/skills`, `<project>/.claude/skills` | OpenCode compatibility inventory |
 | `~/.codex/plugins/cache` | Codex plugin inventory, read-only |
 
-`XDG_CONFIG_HOME` defaults to `~/.config`. Skill directories are scanned recursively, stopping at a `SKILL.md` package; `.git` and `node_modules` are skipped. Symlink cycles, unreadable directories, malformed frontmatter, and duplicate names are reported. Adoption requires the portable name/description format and a matching directory name.
+`XDG_CONFIG_HOME` defaults to `~/.config`. Skill directories are scanned recursively, stopping at a `SKILL.md` package; `.git` and `node_modules` are skipped. Symlink cycles, unreadable directories, malformed frontmatter, and duplicate names are reported. Duplicate packages are compared by content, permissions, and symlink targets. Adoption requires a unique portable name/description package; use `resolve <id>` when copies conflict.
 
 “Enabled” means skmr's discovery links are enabled. It does not override agent permissions, project trust, native disabled-skill settings, or an already-running session. Agent badges describe directory-based visibility, not a live query of each agent. Shared enablement applies to all three agents; another unmanaged or inherited copy may remain discoverable after disabling a managed copy. Restart or reload an agent if changes do not appear.
 

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/faizmokh/skmr/internal/skills"
 )
 
 func fixture(t *testing.T) (*Service, string) {
@@ -62,7 +64,7 @@ func TestLifecycle(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				p = filepath.Join(project, ".pi", "skills", "sample")
+				p = filepath.Join(project, ".pi", "skills", "project-sample")
 				skill(t, p)
 			}
 			plan, e := s.Preview("adopt", p)
@@ -171,16 +173,17 @@ func TestReplacedLinkIsNeverRemoved(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if e = os.Remove(p); e != nil {
+			link := r.Links[0]
+			if e = os.Remove(link); e != nil {
 				t.Fatal(e)
 			}
-			if e = os.WriteFile(p, []byte("user data"), 0644); e != nil {
+			if e = os.WriteFile(link, []byte("user data"), 0644); e != nil {
 				t.Fatal(e)
 			}
 			if e = s.Apply(plan); e == nil {
 				t.Fatal("replaced link accepted")
 			}
-			b, e := os.ReadFile(p)
+			b, e := os.ReadFile(link)
 			if e != nil || string(b) != "user data" {
 				t.Fatal("user data changed")
 			}
@@ -307,17 +310,21 @@ func TestRecoveryConflict(t *testing.T) {
 	if e = move(source, p.Record.Library, p.Identity); e != nil {
 		t.Fatal(e)
 	}
-	if e = os.WriteFile(source, []byte("keep me"), 0644); e != nil {
+	shared := p.Record.Links[0]
+	if e = os.MkdirAll(filepath.Dir(shared), 0755); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(shared, []byte("keep me"), 0644); e != nil {
 		t.Fatal(e)
 	}
 	if e = s.Recover(); e == nil {
 		t.Fatal("conflict ignored")
 	}
-	b, _ := os.ReadFile(source)
+	b, _ := os.ReadFile(shared)
 	if string(b) != "keep me" {
 		t.Fatal("conflict overwritten")
 	}
-	if e = os.Remove(source); e != nil {
+	if e = os.Remove(shared); e != nil {
 		t.Fatal(e)
 	}
 	if e = s.Recover(); e != nil {
@@ -450,6 +457,14 @@ func TestManifestValidationAndSymlinkParents(t *testing.T) {
 		t.Fatal("bad manifest accepted")
 	}
 	m.Records[0] = r
+	m.Records[0].Origins = nil
+	if e = atomicJSON(filepath.Join(s.Store, "manifest.json"), m); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.List(); e == nil {
+		t.Fatal("version 2 record without origins accepted")
+	}
+	m.Records[0] = r
 	m.Version = 99
 	if e = atomicJSON(filepath.Join(s.Store, "manifest.json"), m); e != nil {
 		t.Fatal(e)
@@ -465,7 +480,7 @@ func TestParentReplacement(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	dir := filepath.Dir(p)
+	dir := filepath.Dir(r.Links[0])
 	moved := dir + "-old"
 	if e = os.Rename(dir, moved); e != nil {
 		t.Fatal(e)
@@ -548,17 +563,18 @@ func TestDoctorReportsOccupiedDisabledPaths(t *testing.T) {
 	s, source := fixture(t)
 	record := apply(t, s, "adopt", source).Record
 	apply(t, s, "disable", record.ID)
-	if err := os.WriteFile(source, []byte("unrelated content"), 0644); err != nil {
+	link := record.Links[0]
+	if err := os.WriteFile(link, []byte("unrelated content"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	report, err := s.Doctor()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Healthy || !strings.Contains(strings.Join(report.Issues, "\n"), source) {
+	if report.Healthy || !strings.Contains(strings.Join(report.Issues, "\n"), link) {
 		t.Fatalf("missed conflict: %+v", report)
 	}
-	data, err := os.ReadFile(source)
+	data, err := os.ReadFile(link)
 	if err != nil || string(data) != "unrelated content" {
 		t.Fatal("diagnosis changed user content")
 	}
@@ -655,5 +671,478 @@ func TestInheritedJournalIsReportedAndGitBoundaryRespected(t *testing.T) {
 	report, err = nested.Doctor()
 	if err != nil || !report.Healthy {
 		t.Fatalf("unexpected report after recovery: %+v %v", report, err)
+	}
+}
+
+func TestConflictClassificationAndResolutionLifecycle(t *testing.T) {
+	s, canonicalPath := fixture(t)
+	duplicatePath := filepath.Join(s.Config.ConfigHome, "opencode", "skills", "sample")
+	skill(t, duplicatePath)
+
+	result, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Skills) != 2 {
+		t.Fatalf("expected two copies, got %+v", result.Skills)
+	}
+	for _, item := range result.Skills {
+		if item.ConflictKind != "identical" || item.ConflictCount != 2 || item.ConflictID == "" {
+			t.Fatalf("missing identical conflict metadata: %+v", item)
+		}
+	}
+	if _, err = s.Preview("adopt", canonicalPath); err == nil || !strings.Contains(err.Error(), "use resolve") {
+		t.Fatal("duplicate adoption did not direct user to resolve", err)
+	}
+
+	if err = os.WriteFile(filepath.Join(duplicatePath, "different.txt"), []byte("keep this variant"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var canonicalID string
+	for _, item := range result.Skills {
+		if item.ConflictKind != "divergent" {
+			t.Fatalf("expected divergent conflict: %+v", item)
+		}
+		if item.Path == canonicalPath {
+			canonicalID = item.ID
+		}
+	}
+
+	plan, err := s.Preview("resolve", canonicalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) != 2 || len(plan.Record.Origins) != 2 || len(plan.Comparisons) != 1 || len(plan.Comparisons[0].Differences) == 0 {
+		t.Fatalf("incomplete resolution plan: %+v", plan)
+	}
+	if absent(canonicalPath) || absent(duplicatePath) {
+		t.Fatal("preview changed source folders")
+	}
+	if err = s.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	if !owned(filepath.Join(s.Shared(), "sample"), plan.Record.Library) || !absent(canonicalPath) || !absent(duplicatePath) {
+		t.Fatal("resolution did not leave one shared discovery link")
+	}
+	result, err = s.List()
+	if err != nil || len(result.Skills) != 1 || !result.Skills[0].Managed || result.Skills[0].ConflictID != "" {
+		t.Fatalf("conflict remained after resolution: %+v %v", result, err)
+	}
+
+	apply(t, s, "disable", plan.Record.ID)
+	if !absent(filepath.Join(s.Shared(), "sample")) {
+		t.Fatal("disable retained shared link")
+	}
+	apply(t, s, "enable", plan.Record.ID)
+	apply(t, s, "restore", plan.Record.ID)
+	if stat, statErr := os.Stat(canonicalPath); statErr != nil || !stat.IsDir() {
+		t.Fatal("canonical origin was not restored", statErr)
+	}
+	data, err := os.ReadFile(filepath.Join(duplicatePath, "different.txt"))
+	if err != nil || string(data) != "keep this variant" {
+		t.Fatal("duplicate variant was not restored", err)
+	}
+	if stat, err := os.Stat(filepath.Join(duplicatePath, "different.txt")); err != nil || stat.Mode().Perm() != 0640 {
+		t.Fatal("duplicate permissions were not preserved", err)
+	}
+}
+
+func TestResolveLeavesExternalConflictVisible(t *testing.T) {
+	s, canonicalPath := fixture(t)
+	externalTarget := filepath.Join(s.Config.Home, "external", "sample")
+	skill(t, externalTarget)
+	externalLink := filepath.Join(s.Config.Home, ".pi", "agent", "skills", "sample")
+	if err := os.MkdirAll(filepath.Dir(externalLink), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalTarget, externalLink); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var canonicalID string
+	for _, item := range result.Skills {
+		if item.Path == canonicalPath {
+			canonicalID = item.ID
+		}
+		if item.ConflictKind != "external" || len(item.Unresolved) == 0 {
+			t.Fatalf("external conflict not classified: %+v", item)
+		}
+	}
+	plan := apply(t, s, "resolve", canonicalID)
+	if _, err := os.Lstat(externalLink); err != nil {
+		t.Fatal("external link was modified", err)
+	}
+	result, err = s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundManaged, foundExternal := false, false
+	for _, item := range result.Skills {
+		foundManaged = foundManaged || item.ID == plan.Record.ID && item.Managed
+		foundExternal = foundExternal || item.Path == externalLink && item.ReadOnly
+	}
+	if !foundManaged || !foundExternal {
+		t.Fatalf("remaining external conflict hidden: %+v", result.Skills)
+	}
+}
+
+func TestVersionOneManifestLoadsAsLegacyConflict(t *testing.T) {
+	s, source := fixture(t)
+	item := skills.Parse(source)
+	library := filepath.Join(s.Store, "library", item.ID, item.Name)
+	shared := filepath.Join(s.Shared(), item.Name)
+	legacy := Manifest{Version: legacyVersion, Records: []Record{{
+		ID: item.ID, Name: item.Name, Original: source, Library: library,
+		Links: []string{source, shared}, Enabled: true,
+	}}}
+	if err := mkdir(s.Store); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := identity(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = move(source, library, identity); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range legacy.Records[0].Links {
+		if err = s.link(link, library); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = atomicJSON(filepath.Join(s.Store, "manifest.json"), legacy); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.load()
+	if err != nil || loaded.Version != Version || len(loaded.Records[0].Origins) != 1 {
+		t.Fatalf("legacy manifest did not migrate in memory: %+v %v", loaded, err)
+	}
+	result, err := s.List()
+	if err != nil || len(result.Skills) != 1 || result.Skills[0].ConflictKind != "identical" {
+		t.Fatalf("legacy discovery conflict not reported: %+v %v", result, err)
+	}
+}
+
+func TestInterruptedResolutionRecovery(t *testing.T) {
+	s, canonical := fixture(t)
+	duplicate := filepath.Join(s.Config.ConfigHome, "opencode", "skills", "sample")
+	skill(t, duplicate)
+	result, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var canonicalID string
+	for _, item := range result.Skills {
+		if item.Path == canonical {
+			canonicalID = item.ID
+		}
+	}
+	plan, err := s.Preview("resolve", canonicalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = mkdir(s.Store); err != nil {
+		t.Fatal(err)
+	}
+	if err = atomicJSON(filepath.Join(s.Store, "journal.json"), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err = move(plan.Moves[0].From, plan.Moves[0].To, plan.Moves[0].Identity); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Recover(); err != nil {
+		t.Fatal("resolution recovery is not idempotent", err)
+	}
+	result, err = s.List()
+	if err != nil || len(result.Skills) != 1 || !result.Skills[0].Managed {
+		t.Fatalf("resolution recovery incomplete: %+v %v", result, err)
+	}
+}
+
+func TestResolveCanReplaceManagedCanonical(t *testing.T) {
+	s, oldPath := fixture(t)
+	oldRecord := apply(t, s, "adopt", oldPath).Record
+	newPath := filepath.Join(s.Config.ConfigHome, "opencode", "skills", "sample")
+	skill(t, newPath)
+	if err := os.WriteFile(filepath.Join(newPath, "new.txt"), []byte("new canonical"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newID string
+	for _, item := range result.Skills {
+		if item.Path == newPath {
+			newID = item.ID
+		}
+	}
+	plan := apply(t, s, "resolve", newID)
+	if plan.Record.ID == oldRecord.ID || len(plan.Record.Origins) != 2 {
+		t.Fatalf("canonical was not replaced: %+v", plan.Record)
+	}
+	if !absent(oldRecord.Library) || !owned(filepath.Join(s.Shared(), "sample"), plan.Record.Library) {
+		t.Fatal("old canonical remained active")
+	}
+	apply(t, s, "restore", plan.Record.ID)
+	if _, err := os.Stat(filepath.Join(oldPath, "scripts", "run.sh")); err != nil {
+		t.Fatal("old canonical was not restored", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(newPath, "new.txt")); err != nil || string(data) != "new canonical" {
+		t.Fatal("new canonical was not restored", err)
+	}
+}
+
+func TestCanonicalSwitchRecoveryAfterExecution(t *testing.T) {
+	s, oldPath := fixture(t)
+	oldRecord := apply(t, s, "adopt", oldPath).Record
+	newPath := filepath.Join(s.Config.ConfigHome, "opencode", "skills", "sample")
+	skill(t, newPath)
+	result, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newID string
+	for _, item := range result.Skills {
+		if item.Path == newPath {
+			newID = item.ID
+		}
+	}
+	plan, err := s.Preview("resolve", newID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = atomicJSON(filepath.Join(s.Store, "journal.json"), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.execute(plan); err != nil {
+		t.Fatal(err)
+	}
+	if owned(oldRecord.Links[0], oldRecord.Library) || !owned(plan.Record.Links[0], plan.Record.Library) {
+		t.Fatal("canonical link was not switched")
+	}
+	if err = s.Recover(); err != nil {
+		t.Fatal("executed canonical switch did not recover", err)
+	}
+	manifest, err := s.load()
+	if err != nil || len(manifest.Records) != 1 || manifest.Records[0].ID != newID {
+		t.Fatalf("canonical switch manifest was not committed: %+v %v", manifest, err)
+	}
+}
+
+func TestResolveRejectsOccupiedReservedOrigin(t *testing.T) {
+	s, original := fixture(t)
+	record := apply(t, s, "adopt", original).Record
+	skill(t, original)
+	result, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Skills) != 2 || result.Skills[0].ID == result.Skills[1].ID {
+		t.Fatalf("reserved origin did not receive a distinct conflict ID: %+v", result.Skills)
+	}
+	if _, err = s.Preview("resolve", record.ID); err == nil || !strings.Contains(err.Error(), "reserved restore path") {
+		t.Fatal("occupied reserved origin was accepted", err)
+	}
+	report, err := s.Doctor()
+	if err != nil || report.Healthy || !strings.Contains(strings.Join(report.Issues, "\n"), "Restore path is occupied") {
+		t.Fatalf("doctor missed occupied restore path: %+v %v", report, err)
+	}
+}
+
+func TestVersionOneJournalRecovery(t *testing.T) {
+	s, source := fixture(t)
+	item := skills.Parse(source)
+	library := filepath.Join(s.Store, "library", item.ID, item.Name)
+	shared := filepath.Join(s.Shared(), item.Name)
+	id, err := identity(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := Plan{
+		Version: legacyVersion,
+		Action:  "adopt",
+		Record: Record{
+			ID: item.ID, Name: item.Name, Original: source, Library: library,
+			Links: []string{source, shared}, Enabled: true,
+		},
+		Identity: id,
+		Before:   Manifest{Version: legacyVersion, Records: []Record{}},
+	}
+	if err = mkdir(s.Store); err != nil {
+		t.Fatal(err)
+	}
+	if err = atomicJSON(filepath.Join(s.Store, "journal.json"), legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := s.load()
+	if err != nil || manifest.Version != Version || len(manifest.Records) != 1 || len(manifest.Records[0].Origins) != 1 {
+		t.Fatalf("legacy journal was not upgraded: %+v %v", manifest, err)
+	}
+}
+
+func TestResolutionRejectsContentChangedAfterPreview(t *testing.T) {
+	s, canonical := fixture(t)
+	duplicate := filepath.Join(s.Config.ConfigHome, "opencode", "skills", "sample")
+	skill(t, duplicate)
+	result, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var canonicalID string
+	for _, item := range result.Skills {
+		if item.Path == canonical {
+			canonicalID = item.ID
+		}
+	}
+	plan, err := s.Preview("resolve", canonicalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(duplicate, "changed.txt"), []byte("changed after review"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Apply(plan); err == nil || !strings.Contains(err.Error(), "state changed") {
+		t.Fatal("changed package was accepted", err)
+	}
+	if absent(canonical) || absent(duplicate) {
+		t.Fatal("stale resolution changed source folders")
+	}
+}
+
+func TestProjectResolutionRemainsRelocatable(t *testing.T) {
+	global, _ := fixture(t)
+	repo := filepath.Join(global.Config.Home, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{Home: global.Config.Home, Project: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(repo, ".pi", "skills", "sample")
+	duplicate := filepath.Join(repo, ".opencode", "skills", "sample")
+	skill(t, canonical)
+	skill(t, duplicate)
+	result, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var canonicalID string
+	for _, item := range result.Skills {
+		if item.Path == canonical {
+			canonicalID = item.ID
+		}
+	}
+	plan := apply(t, s, "resolve", canonicalID)
+	manifestData, err := os.ReadFile(filepath.Join(s.Store, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manifestData), repo) {
+		t.Fatal("resolved project manifest contains absolute project paths")
+	}
+	moved := filepath.Join(global.Config.Home, "moved-repo")
+	if err = os.Rename(repo, moved); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(Config{Home: global.Config.Home, Project: moved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply(t, s, "disable", plan.Record.ID)
+	apply(t, s, "enable", plan.Record.ID)
+	apply(t, s, "restore", plan.Record.ID)
+	for _, path := range []string{filepath.Join(moved, ".pi", "skills", "sample"), filepath.Join(moved, ".opencode", "skills", "sample")} {
+		if stat, statErr := os.Stat(path); statErr != nil || !stat.IsDir() {
+			t.Fatal("project duplicate was not restored after relocation", path, statErr)
+		}
+	}
+}
+
+func TestResolutionCollisionDoesNotMoveSources(t *testing.T) {
+	s, canonical := fixture(t)
+	duplicate := filepath.Join(s.Config.ConfigHome, "opencode", "skills", "sample")
+	skill(t, duplicate)
+	canonicalID := skills.ID(canonical)
+	backup := filepath.Join(s.Store, "library", canonicalID, ".skmr-duplicates", skills.ID(duplicate), "sample")
+	if err := os.MkdirAll(backup, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Preview("resolve", canonicalID); err == nil || !strings.Contains(err.Error(), "destination already exists") {
+		t.Fatal("backup collision was accepted", err)
+	}
+	for _, path := range []string{canonical, duplicate} {
+		if stat, err := os.Stat(path); err != nil || !stat.IsDir() {
+			t.Fatal("collision changed source", path, err)
+		}
+	}
+}
+
+func TestResolutionPermissionFailureRecovers(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	s, canonical := fixture(t)
+	duplicate := filepath.Join(s.Config.ConfigHome, "opencode", "skills", "sample")
+	skill(t, duplicate)
+	plan, err := s.Preview("resolve", skills.ID(canonical))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(duplicate)
+	if err = os.Chmod(parent, 0555); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Apply(plan); err == nil {
+		t.Fatal("permission failure expected")
+	}
+	if err = os.Chmod(parent, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.List()
+	if err != nil || len(result.Skills) != 1 || !result.Skills[0].Managed {
+		t.Fatalf("permission recovery incomplete: %+v %v", result, err)
+	}
+}
+
+func TestResolutionRejectsReplacedManagedLink(t *testing.T) {
+	s, source := fixture(t)
+	record := apply(t, s, "adopt", source).Record
+	duplicate := filepath.Join(s.Config.ConfigHome, "opencode", "skills", "sample")
+	skill(t, duplicate)
+	plan, err := s.Preview("resolve", record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := record.Links[0]
+	if err = os.Remove(shared); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(shared, []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Apply(plan); err == nil {
+		t.Fatal("replaced shared link was accepted")
+	}
+	data, err := os.ReadFile(shared)
+	if err != nil || string(data) != "keep me" {
+		t.Fatal("replaced shared link was modified", err)
 	}
 }

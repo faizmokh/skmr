@@ -18,17 +18,22 @@ import (
 )
 
 type Skill struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Path        string   `json:"path"`
-	Scope       string   `json:"scope"`
-	Agents      []string `json:"agents"`
-	Managed     bool     `json:"managed"`
-	Enabled     bool     `json:"enabled"`
-	Inherited   bool     `json:"inherited"`
-	ReadOnly    bool     `json:"read_only"`
-	Issues      []string `json:"issues"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description"`
+	Path          string   `json:"path"`
+	Scope         string   `json:"scope"`
+	Agents        []string `json:"agents"`
+	Managed       bool     `json:"managed"`
+	Enabled       bool     `json:"enabled"`
+	Inherited     bool     `json:"inherited"`
+	ReadOnly      bool     `json:"read_only"`
+	Issues        []string `json:"issues"`
+	ConflictID    string   `json:"conflict_id,omitempty"`
+	ConflictKind  string   `json:"conflict_kind,omitempty"`
+	ConflictCount int      `json:"conflict_count,omitempty"`
+	Canonical     bool     `json:"canonical,omitempty"`
+	Unresolved    []string `json:"unresolved_paths,omitempty"`
 }
 
 type Result struct {
@@ -60,6 +65,114 @@ func Read(path string) ([]byte, error) {
 		return nil, fmt.Errorf("SKILL.md exceeds 1 MiB")
 	}
 	return b, err
+}
+
+// Digest identifies package content and behavior-relevant metadata without
+// depending on timestamps, ownership, or the package's absolute location.
+func Digest(path string) (string, error) {
+	entries, err := packageEntries(path)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	paths := make([]string, 0, len(entries))
+	for rel := range entries {
+		paths = append(paths, rel)
+	}
+	sort.Strings(paths)
+	for _, rel := range paths {
+		fmt.Fprintf(h, "%s\x00%s\x00", rel, entries[rel])
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// Differences returns stable, relative package differences from canonical to copy.
+func Differences(canonical, copy string) ([]string, error) {
+	left, err := packageEntries(canonical)
+	if err != nil {
+		return nil, err
+	}
+	right, err := packageEntries(copy)
+	if err != nil {
+		return nil, err
+	}
+	paths := map[string]bool{}
+	for path := range left {
+		paths[path] = true
+	}
+	for path := range right {
+		paths[path] = true
+	}
+	ordered := make([]string, 0, len(paths))
+	for path := range paths {
+		if path != "." {
+			ordered = append(ordered, path)
+		}
+	}
+	sort.Strings(ordered)
+	differences := []string{}
+	for _, path := range ordered {
+		leftValue, inLeft := left[path]
+		rightValue, inRight := right[path]
+		switch {
+		case !inLeft:
+			differences = append(differences, "only in copy: "+path)
+		case !inRight:
+			differences = append(differences, "only in canonical: "+path)
+		case leftValue != rightValue:
+			differences = append(differences, "changed: "+path)
+		}
+	}
+	return differences, nil
+}
+
+func packageEntries(path string) (map[string]string, error) {
+	entries := map[string]string{}
+	err := filepath.WalkDir(path, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(path, current)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		value := fmt.Sprintf("%s:%04o:", info.Mode().Type().String(), info.Mode().Perm())
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(current)
+			if err != nil {
+				return err
+			}
+			entries[rel] = value + target
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			entries[rel] = value
+			return nil
+		}
+		file, err := os.Open(current)
+		if err != nil {
+			return err
+		}
+		contentHash := sha256.New()
+		_, copyErr := io.Copy(contentHash, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		entries[rel] = value + fmt.Sprintf("%x", contentHash.Sum(nil))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 func Parse(path string) Skill {

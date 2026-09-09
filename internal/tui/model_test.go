@@ -224,3 +224,32 @@ func TestMouseSelectionFiltersSearchAndScrolling(t *testing.T) {
 		t.Fatal("detail wheel did not scroll preview")
 	}
 }
+
+func TestConflictIndicatorAndResolveAction(t *testing.T) {
+	m := model(t)
+	duplicate := filepath.Join(m.service.Config.Home, ".codex", "skills", "alpha")
+	if err := os.MkdirAll(duplicate, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(duplicate, "SKILL.md"), []byte("---\nname: alpha\ndescription: Conflicting copy\n---\nDifferent"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+
+	view := m.View()
+	if !strings.Contains(view, "divergent") || !strings.Contains(view, "2 copies") {
+		t.Fatalf("conflict details missing: %s", view)
+	}
+	m, cmd = key(m, "c")
+	if cmd == nil {
+		t.Fatal("resolve action did not create a preview command")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.pending == nil || m.pending.Action != "resolve" {
+		t.Fatal("resolve preview not shown")
+	}
+}

@@ -7,31 +7,68 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+
+	"github.com/faizmokh/skmr/internal/skills"
 )
 
 type Plan struct {
-	Version  int      `json:"version"`
-	Action   string   `json:"action"`
-	Record   Record   `json:"record"`
+	Version     int          `json:"version"`
+	Action      string       `json:"action"`
+	Record      Record       `json:"record"`
+	Identity    Identity     `json:"identity"`
+	Moves       []MovePlan   `json:"moves,omitempty"`
+	RemoveLinks []LinkPlan   `json:"remove_links,omitempty"`
+	Comparisons []Comparison `json:"comparisons,omitempty"`
+	Before      Manifest     `json:"before"`
+}
+
+type MovePlan struct {
+	From     string   `json:"from"`
+	To       string   `json:"to"`
 	Identity Identity `json:"identity"`
-	Before   Manifest `json:"before"`
+	Digest   string   `json:"digest,omitempty"`
+}
+
+type LinkPlan struct {
+	Path   string `json:"path"`
+	Target string `json:"target"`
+}
+
+type Comparison struct {
+	Path        string   `json:"path"`
+	Differences []string `json:"differences"`
 }
 
 func (p Plan) String() string {
 	r := p.Record
 	var lines []string
-	switch p.Action {
-	case "adopt":
-		lines = append(lines, "Move "+r.Original, "  to "+r.Library)
-	case "restore":
-		lines = append(lines, "Restore "+r.Library, "     to "+r.Original)
+	for _, move := range p.Moves {
+		verb := "Move "
+		if p.Action == "restore" {
+			verb = "Restore "
+		}
+		lines = append(lines, verb+move.From, "  to "+move.To)
 	}
-	verb := "Create link"
-	if p.Action == "disable" || p.Action == "restore" {
-		verb = "Remove owned link"
+	for _, link := range p.RemoveLinks {
+		lines = append(lines, "Remove owned link "+link.Path)
 	}
-	for _, path := range r.Links {
-		lines = append(lines, verb+" "+path)
+	if p.Action == "adopt" || p.Action == "enable" || p.Action == "resolve" {
+		for _, path := range r.Links {
+			lines = append(lines, "Create link "+path)
+		}
+	} else if len(p.RemoveLinks) == 0 {
+		for _, path := range r.Links {
+			lines = append(lines, "Remove owned link "+path)
+		}
+	}
+	for _, comparison := range p.Comparisons {
+		lines = append(lines, "Compare with "+comparison.Path)
+		if len(comparison.Differences) == 0 {
+			lines = append(lines, "  identical package")
+		}
+		for _, difference := range comparison.Differences {
+			lines = append(lines, "  "+difference)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -54,7 +91,15 @@ func (s *Service) preview(action, arg string) (Plan, error) {
 			return Plan{}, err
 		}
 		p.Identity, err = identity(p.Record.Original)
+		if err == nil {
+			var planned MovePlan
+			planned, err = newMovePlan(p.Record.Original, p.Record.Library)
+			p.Moves = []MovePlan{planned}
+		}
 		return p, err
+	}
+	if action == "resolve" {
+		return s.resolution(arg, m)
 	}
 	if action != "enable" && action != "disable" && action != "restore" {
 		return p, fmt.Errorf("unknown action: %s", action)
@@ -92,10 +137,26 @@ func (s *Service) preview(action, arg string) (Plan, error) {
 		}
 	}
 	if action == "restore" {
-		if err = sameDevice(r.Library, r.Original); err != nil {
-			return p, err
+		for _, origin := range r.Origins {
+			source := origin.Backup
+			if origin.Canonical {
+				source = r.Library
+			}
+			if err = sameDevice(source, origin.Path); err != nil {
+				return p, err
+			}
+			planned, planErr := newMovePlan(source, origin.Path)
+			if planErr != nil {
+				return p, planErr
+			}
+			if !absent(origin.Path) && !owned(origin.Path, r.Library) {
+				return p, fmt.Errorf("restore destination already exists: %s", origin.Path)
+			}
+			p.Moves = append(p.Moves, planned)
+			if origin.Canonical {
+				p.Identity = planned.Identity
+			}
 		}
-		p.Identity, err = identity(r.Library)
 	}
 	return p, err
 }
@@ -142,6 +203,9 @@ func (s *Service) Recover() error {
 	if err = json.Unmarshal(b, &p); err != nil {
 		return fmt.Errorf("read recovery journal: %w", err)
 	}
+	if p.Version == legacyVersion && p.Before.Version == legacyVersion {
+		upgradeLegacyPlan(&p)
+	}
 	if p.Version != Version || p.Before.Version != Version {
 		return fmt.Errorf("unsupported journal version")
 	}
@@ -168,11 +232,40 @@ func (s *Service) Recover() error {
 	return s.finish(p)
 }
 
+func upgradeLegacyPlan(p *Plan) {
+	p.Version = Version
+	p.Before.Version = Version
+	for i := range p.Before.Records {
+		if len(p.Before.Records[i].Origins) == 0 {
+			p.Before.Records[i].Origins = []Origin{{Path: p.Before.Records[i].Original, Canonical: true}}
+		}
+	}
+	if len(p.Record.Origins) == 0 {
+		p.Record.Origins = []Origin{{Path: p.Record.Original, Canonical: true}}
+	}
+	if len(p.Moves) == 0 {
+		switch p.Action {
+		case "adopt":
+			p.Moves = []MovePlan{{From: p.Record.Original, To: p.Record.Library, Identity: p.Identity}}
+		case "restore":
+			p.Moves = []MovePlan{{From: p.Record.Library, To: p.Record.Original, Identity: p.Identity}}
+		}
+	}
+}
+
 func resultManifest(p Plan) (Manifest, error) {
 	m := Manifest{Version: Version, Records: append([]Record{}, p.Before.Records...)}
 	switch p.Action {
 	case "adopt":
 		m.Records = append(m.Records, p.Record)
+	case "resolve":
+		filtered := m.Records[:0]
+		for _, record := range m.Records {
+			if record.Name != p.Record.Name {
+				filtered = append(filtered, record)
+			}
+		}
+		m.Records = append(filtered, p.Record)
 	case "enable", "disable", "restore":
 		found := false
 		for i, r := range m.Records {
@@ -213,14 +306,45 @@ func (s *Service) finish(p Plan) error {
 func (s *Service) execute(p Plan) error {
 	r := p.Record
 	// Preflight every path before removing any links, including on replay.
-	for _, path := range append(append([]string{}, r.Links...), r.Library) {
+	paths := append(append([]string{}, r.Links...), r.Library)
+	for _, move := range p.Moves {
+		paths = append(paths, move.From, move.To)
+	}
+	for _, link := range p.RemoveLinks {
+		paths = append(paths, link.Path, link.Target)
+	}
+	for _, path := range paths {
 		if err := realParents(path); err != nil {
 			return err
 		}
 	}
+	for _, item := range p.Moves {
+		if destination, err := identity(item.To); err == nil && destination == item.Identity {
+			if err := verifyDigest(item.To, item.Digest); err != nil {
+				return err
+			}
+			continue
+		}
+		source, err := identity(item.From)
+		if err != nil {
+			return err
+		}
+		if source != item.Identity {
+			return fmt.Errorf("source folder changed: %s", item.From)
+		}
+		if err := verifyDigest(item.From, item.Digest); err != nil {
+			return err
+		}
+		if !absent(item.To) {
+			allowedOwnedLink := p.Action == "restore" && owned(item.To, r.Library)
+			if !allowedOwnedLink {
+				return fmt.Errorf("destination already exists: %s", item.To)
+			}
+		}
+	}
 	switch p.Action {
 	case "adopt":
-		if err := move(r.Original, r.Library, p.Identity); err != nil {
+		if err := executeMoves(p.Moves); err != nil {
 			return err
 		}
 		for _, path := range r.Links {
@@ -244,42 +368,74 @@ func (s *Service) execute(p Plan) error {
 				return err
 			}
 		}
-	case "disable", "restore":
-		restored := false
-		if p.Action == "restore" {
-			id, e := identity(r.Original)
-			restored = e == nil && id == p.Identity
-			if !restored {
-				source, err := identity(r.Library)
-				if err != nil {
-					return err
-				}
-				if source != p.Identity {
-					return fmt.Errorf("source folder changed: %s", r.Library)
-				}
-			}
-		}
-		for _, path := range r.Links {
-			if restored && path == r.Original {
+	case "resolve":
+		for _, link := range p.RemoveLinks {
+			if owned(link.Path, r.Library) {
 				continue
 			}
+			if err := unlink(link.Path, link.Target); err != nil {
+				return err
+			}
+		}
+		if err := executeMoves(p.Moves); err != nil {
+			return err
+		}
+		for _, path := range r.Links {
+			if err := s.link(path, r.Library); err != nil {
+				return err
+			}
+		}
+	case "disable", "restore":
+		for _, path := range r.Links {
 			if !absent(path) && !owned(path, r.Library) {
 				return fmt.Errorf("link was replaced: %s", path)
 			}
 		}
 		for _, path := range r.Links {
-			if restored && path == r.Original {
-				continue
-			}
 			if err := unlink(path, r.Library); err != nil {
 				return err
 			}
 		}
 		if p.Action == "restore" {
-			return move(r.Library, r.Original, p.Identity)
+			return executeMoves(p.Moves)
 		}
 	default:
 		return fmt.Errorf("unknown action %q", p.Action)
+	}
+	return nil
+}
+
+func executeMoves(moves []MovePlan) error {
+	for _, item := range moves {
+		if err := move(item.From, item.To, item.Identity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func newMovePlan(from, to string) (MovePlan, error) {
+	id, err := identity(from)
+	if err != nil {
+		return MovePlan{}, err
+	}
+	digest, err := skills.Digest(from)
+	if err != nil {
+		return MovePlan{}, err
+	}
+	return MovePlan{From: from, To: to, Identity: id, Digest: digest}, nil
+}
+
+func verifyDigest(path, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	actual, err := skills.Digest(path)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("source content changed since preview: %s", path)
 	}
 	return nil
 }

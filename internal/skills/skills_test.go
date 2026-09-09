@@ -104,3 +104,50 @@ func TestNonRegularDocument(t *testing.T) {
 		t.Fatal("FIFO accepted as skill content")
 	}
 }
+
+func TestDigestIncludesContentModesAndSymlinkTargets(t *testing.T) {
+	one := filepath.Join(t.TempDir(), "skill")
+	two := filepath.Join(t.TempDir(), "skill")
+	for _, path := range []string{one, two} {
+		write(t, path, "---\nname: skill\ndescription: Test\n---\nBody")
+		if err := os.WriteFile(filepath.Join(path, "run.sh"), []byte("echo ok\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("run.sh", filepath.Join(path, "run")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oneDigest, err := Digest(one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twoDigest, err := Digest(two)
+	if err != nil || oneDigest != twoDigest {
+		t.Fatal("identical package digests differ", err)
+	}
+	differences, err := Differences(one, two)
+	if err != nil || len(differences) != 0 {
+		t.Fatal("identical packages reported differences", differences, err)
+	}
+	if err = os.Chmod(filepath.Join(two, "run.sh"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	modeDigest, err := Digest(two)
+	if err != nil || modeDigest == oneDigest {
+		t.Fatal("permission change missing from digest", err)
+	}
+	differences, err = Differences(one, two)
+	if err != nil || !strings.Contains(strings.Join(differences, "\n"), "changed: run.sh") {
+		t.Fatal("permission change missing from comparison", differences, err)
+	}
+	if err = os.Remove(filepath.Join(two, "run")); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink("SKILL.md", filepath.Join(two, "run")); err != nil {
+		t.Fatal(err)
+	}
+	linkDigest, err := Digest(two)
+	if err != nil || linkDigest == modeDigest {
+		t.Fatal("symlink target change missing from digest", err)
+	}
+}

@@ -185,7 +185,8 @@ func (m Model) detailLines(width, height int) []string {
 			"",
 			accentStyle.Render("Manage selected skill"),
 			"  a  adopt       e  enable        d  disable",
-			"  r  restore     ?  close help    q  quit",
+			"  c  resolve     r  restore       ?  close help",
+			"  q  quit",
 			"",
 			accentStyle.Render("Mouse"),
 			"  Click skills, filters, scope, search, or footer actions",
@@ -209,6 +210,15 @@ func (m Model) detailLines(width, height int) []string {
 	lines = append(lines, field("Scope", terminal.Safe(s.Scope), width)...)
 	lines = append(lines, field("Agents", terminal.Safe(strings.Join(s.Agents, ", ")), width)...)
 	lines = append(lines, field("ID", terminal.Safe(s.ID), width)...)
+	if s.ConflictKind != "" {
+		lines = append(lines, field("Conflict", fmt.Sprintf("%s · %d copies", s.ConflictKind, s.ConflictCount), width)...)
+		if s.Canonical {
+			lines = append(lines, field("Canonical", "yes", width)...)
+		}
+		for _, path := range s.Unresolved {
+			lines = append(lines, field("External", terminal.Safe(path), width)...)
+		}
+	}
 	if len(s.Issues) > 0 {
 		lines = append(lines, "", warningStyle.Render(fmt.Sprintf("! Problems (%d)", len(s.Issues))))
 		for _, issue := range s.Issues {
@@ -270,7 +280,7 @@ func (m Model) shortcuts() []shortcut {
 	if skill, ok := m.selected(); ok && skill.Managed && skill.Enabled {
 		toggle = "d"
 	}
-	return []shortcut{{"↑↓", "select", ""}, {"/", "search", "/"}, {"a", "adopt", "a"}, {"e/d", "toggle", toggle}, {"r", "restore", "r"}, {"?", "help", "?"}, {"q", "quit", "q"}}
+	return []shortcut{{"↑↓", "select", ""}, {"/", "search", "/"}, {"a", "adopt", "a"}, {"c", "resolve", "c"}, {"e/d", "toggle", toggle}, {"r", "restore", "r"}, {"?", "help", "?"}, {"q", "quit", "q"}}
 }
 
 func (m Model) footerKeyAt(x int) string {
@@ -286,6 +296,9 @@ func (m Model) footerKeyAt(x int) string {
 }
 
 func compactState(skill skills.Skill) (string, lipgloss.Style) {
+	if skill.ConflictKind != "" {
+		return "! " + skill.ConflictKind, warningStyle
+	}
 	if len(skill.Issues) > 0 {
 		return "! warning", warningStyle
 	}

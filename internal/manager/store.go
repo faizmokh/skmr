@@ -9,7 +9,16 @@ import (
 	"syscall"
 )
 
-const Version = 1
+const (
+	legacyVersion = 1
+	Version       = 2
+)
+
+type Origin struct {
+	Path      string `json:"path"`
+	Backup    string `json:"backup,omitempty"`
+	Canonical bool   `json:"canonical"`
+}
 
 type Record struct {
 	ID       string   `json:"id"`
@@ -18,6 +27,7 @@ type Record struct {
 	Library  string   `json:"library"`
 	Links    []string `json:"links"`
 	Enabled  bool     `json:"enabled"`
+	Origins  []Origin `json:"origins,omitempty"`
 }
 type Manifest struct {
 	Version int      `json:"version"`
@@ -53,9 +63,11 @@ func (s *Service) load() (Manifest, error) {
 	if err = json.Unmarshal(b, &m); err != nil {
 		return m, fmt.Errorf("read manifest: %w", err)
 	}
-	if m.Version != Version {
+	if m.Version != legacyVersion && m.Version != Version {
 		return m, fmt.Errorf("unsupported manifest version %d", m.Version)
 	}
+	legacy := m.Version == legacyVersion
+	m.Version = Version
 	ids := map[string]bool{}
 	for i := range m.Records {
 		r := &m.Records[i]
@@ -65,6 +77,15 @@ func (s *Service) load() (Manifest, error) {
 			for j := range r.Links {
 				r.Links[j] = s.absolute(r.Links[j])
 			}
+			for j := range r.Origins {
+				r.Origins[j].Path = s.absolute(r.Origins[j].Path)
+				if r.Origins[j].Backup != "" {
+					r.Origins[j].Backup = s.absolute(r.Origins[j].Backup)
+				}
+			}
+		}
+		if legacy {
+			r.Origins = []Origin{{Path: r.Original, Canonical: true}}
 		}
 		if err := s.validate(*r); err != nil {
 			return m, err
@@ -115,8 +136,36 @@ func (s *Service) validate(r Record) error {
 		foundOriginal = foundOriginal || p == r.Original
 		foundShared = foundShared || p == shared
 	}
-	if !foundOriginal || !foundShared {
+	if !foundShared || len(r.Links) == 2 && !foundOriginal {
 		return fmt.Errorf("missing owned link for %s", r.ID)
+	}
+	canonical := 0
+	origins := map[string]bool{}
+	for _, origin := range r.Origins {
+		if origin.Path == "" || origins[origin.Path] {
+			return fmt.Errorf("invalid origin for %s", r.ID)
+		}
+		origins[origin.Path] = true
+		originAllowed := false
+		for _, root := range s.Roots {
+			if !root.ReadOnly && !root.Inherited && within(root.Path, origin.Path) && origin.Path != root.Path {
+				originAllowed = true
+			}
+		}
+		if !originAllowed || !filepath.IsAbs(origin.Path) {
+			return fmt.Errorf("origin path is outside writable discovery roots: %s", origin.Path)
+		}
+		if origin.Canonical {
+			canonical++
+			if origin.Path != r.Original || origin.Backup != "" {
+				return fmt.Errorf("invalid canonical origin for %s", r.ID)
+			}
+		} else if origin.Backup == "" || !within(filepath.Join(s.Store, "library", r.ID, ".skmr-duplicates"), origin.Backup) {
+			return fmt.Errorf("invalid duplicate backup for %s", r.ID)
+		}
+	}
+	if canonical != 1 {
+		return fmt.Errorf("missing canonical origin for %s", r.ID)
 	}
 	return nil
 }
@@ -137,6 +186,12 @@ func (s *Service) save(m Manifest) error {
 			r.Library, _ = filepath.Rel(s.Config.Project, r.Library)
 			for j := range r.Links {
 				r.Links[j], _ = filepath.Rel(s.Config.Project, r.Links[j])
+			}
+			for j := range r.Origins {
+				r.Origins[j].Path, _ = filepath.Rel(s.Config.Project, r.Origins[j].Path)
+				if r.Origins[j].Backup != "" {
+					r.Origins[j].Backup, _ = filepath.Rel(s.Config.Project, r.Origins[j].Backup)
+				}
 			}
 		}
 	}

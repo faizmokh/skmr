@@ -124,3 +124,50 @@ func TestDoctorExitStatus(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestResolveJSONDryRunAndNoninteractiveUse(t *testing.T) {
+	shared := setup(t)
+	home := os.Getenv("HOME")
+	duplicate := filepath.Join(home, ".codex", "skills", "sample")
+	if err := os.MkdirAll(duplicate, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(duplicate, "SKILL.md"), []byte("---\nname: sample\ndescription: Different copy\n---\nDifferent\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run("list", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result skills.Result
+	if err = json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	var canonicalID string
+	for _, item := range result.Skills {
+		if item.Path == shared {
+			canonicalID = item.ID
+		}
+		if item.ConflictKind != "divergent" || item.ConflictCount != 2 {
+			t.Fatalf("missing conflict JSON: %+v", item)
+		}
+	}
+	out, err = run("resolve", canonicalID, "--dry-run")
+	if err != nil || !strings.Contains(out, "Move ") || !strings.Contains(out, "Create link ") {
+		t.Fatal(out, err)
+	}
+	if _, err = os.Stat(filepath.Join(os.Getenv("XDG_DATA_HOME"), "skmr")); !os.IsNotExist(err) {
+		t.Fatal("resolve dry run wrote state")
+	}
+	if _, err = run("resolve", canonicalID); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatal("noninteractive resolution must require --yes", err)
+	}
+	if _, err = run("resolve", canonicalID, "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("list", "--json")
+	if err != nil || !strings.Contains(out, `"managed": true`) || strings.Contains(out, `"conflict_id"`) {
+		t.Fatalf("resolution did not clear writable conflict: %s %v", out, err)
+	}
+}
