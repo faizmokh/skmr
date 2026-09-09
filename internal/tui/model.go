@@ -2,7 +2,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -40,6 +39,7 @@ type Model struct {
 	pending       *manager.Plan
 	busy          bool
 	message       string
+	showHelp      bool
 }
 
 func New(s *manager.Service) Model {
@@ -216,6 +216,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filter = (m.filter + 1) % 4
 			m.cursor = 0
 			return m, m.selection()
+		case "1", "2", "3", "4":
+			m.filter = int(key[0] - '1')
+			m.cursor = 0
+			return m, m.selection()
 		case "tab":
 			c := m.service.Config
 			if c.Project != "" {
@@ -270,33 +274,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return previewMsg{p, e, action == "adopt" || action == "restore"}
 			}
 		case "?":
-			m.message = "Tab switches scope · f filters · / searches · PgUp/PgDn scroll details · R refreshes. Recovery: skmr doctor --recover."
+			m.showHelp = !m.showHelp
+			m.offset = 0
 		}
 	}
 	return m, nil
-}
-func skillState(s skills.Skill) string {
-	state := "discovered"
-	if s.Managed {
-		state = "disabled"
-		if s.Enabled {
-			state = "enabled"
-		}
-	}
-	if s.Inherited {
-		state += " · inherited"
-	} else if s.ReadOnly {
-		state += " · read-only"
-	}
-	if len(s.Issues) > 0 {
-		state += " · warning"
-	}
-	return state
-}
-func (m Model) detail() string {
-	s, ok := m.selected()
-	if !ok {
-		return "No matching skills.\nClear search with Esc or change the filter with f."
-	}
-	return fmt.Sprintf("%s\n%s\n\n%s\n\nSource  %s\nScope   %s\nAgents  %s\nID      %s\n%s\n%s", s.Name, skillState(s), s.Description, s.Path, s.Scope, strings.Join(s.Agents, ", "), s.ID, strings.Join(s.Issues, "\n"), m.content)
 }

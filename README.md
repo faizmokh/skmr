@@ -83,11 +83,11 @@ Read commands produce JSON only on stdout with `--json`. Human-readable errors g
 | `↑` / `↓`, `k` / `j` | Select a skill |
 | `/`, `Enter`, `Esc` | Start search, finish editing, clear search |
 | `Tab` | Switch global/project scope (uses nearest Git root if no project was supplied) |
-| `f` | Filter all, managed, discovered, or inherited skills |
+| `f`, `1`–`4` | Cycle or directly select all, managed, discovered, or inherited skills |
 | `a`, `e`, `d`, `r` | Adopt, enable, disable, restore |
 | `y`, `n` / `Esc` | Apply or cancel a change preview |
 | `PgUp` / `PgDn` | Scroll instructions or the change preview |
-| `R`, `?`, `q` | Refresh, help, quit |
+| `R`, `?`, `q` | Refresh, toggle help, quit |
 
 ## Files and ownership
 

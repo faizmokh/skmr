@@ -2,64 +2,106 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/faizmokh/skmr/internal/skills"
 	"github.com/faizmokh/skmr/internal/terminal"
 )
 
-var accent = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
-var muted = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-var selected = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("24"))
+var (
+	cyan        = lipgloss.Color("80")
+	blue        = lipgloss.Color("24")
+	green       = lipgloss.Color("78")
+	yellow      = lipgloss.Color("220")
+	red         = lipgloss.Color("203")
+	mutedColor  = lipgloss.Color("242")
+	borderColor = lipgloss.Color("238")
+
+	brandStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(cyan).Bold(true)
+	accentStyle   = lipgloss.NewStyle().Foreground(cyan).Bold(true)
+	mutedStyle    = lipgloss.NewStyle().Foreground(mutedColor)
+	labelStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(blue).Bold(true)
+	warningStyle  = lipgloss.NewStyle().Foreground(yellow)
+	errorStyle    = lipgloss.NewStyle().Foreground(red)
+	successStyle  = lipgloss.NewStyle().Foreground(green)
+	keyStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("237")).Bold(true)
+)
 
 func (m Model) View() string {
 	w, h := m.width, m.height
 	if w < 30 || h < 10 {
-		return "skmr\nEnlarge the terminal (30 × 10).\nq quit"
+		return "skmr\nTerminal too small (minimum 30 × 10).\nq quit"
 	}
-	label := m.service.Scope()
-	if label == "project" {
-		label += " · " + m.service.Config.Project
-	}
-	header := accent.Render("skmr") + "  " + terminal.Safe(label)
-	filter := []string{"all skills", "managed", "discovered", "inherited"}[m.filter]
-	query := m.query
-	if m.searching {
-		query += "▏"
-	}
-	search := fmt.Sprintf("%s · %d skills   / %s", filter, len(m.items()), query)
-	bodyHeight := max(3, h-7)
+	header := m.header(w)
+	toolbar := m.toolbar(w)
+	bodyHeight := max(6, h-4)
 	var body string
 	if m.pending != nil {
-		text := "Review " + m.pending.Action + "\n\n" + m.pending.String() + "\n\nApply these changes?  y apply · n/Esc cancel"
-		body = panel(text, w-2, bodyHeight, m.offset)
-	} else if w >= 90 {
-		left := min(42, w/3)
-		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listView(left, bodyHeight), "  ", panel(m.detail(), w-left-2, bodyHeight, m.offset))
+		body = m.reviewView(w, bodyHeight)
+	} else if w >= 76 {
+		left := min(44, max(32, w*2/5))
+		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listPane(left, bodyHeight), m.detailPane(w-left, bodyHeight))
 	} else {
-		listHeight := max(2, bodyHeight/3)
-		body = m.listView(w, listHeight) + "\n" + panel(m.detail(), w, max(1, bodyHeight-listHeight-1), m.offset)
+		listHeight := min(max(4, len(m.items())+2), max(3, bodyHeight/2))
+		body = m.listPane(w, listHeight) + "\n" + m.detailPane(w, max(3, bodyHeight-listHeight))
 	}
-	status := terminal.Safe(m.message)
-	if m.busy {
-		status = "Working… " + status
-	}
-	if len(m.result.Issues) > 0 {
-		status += "  Warning: " + terminal.Safe(m.result.Issues[0])
-	}
-	footer := "↑↓/jk select · / search · Tab scope · f filter · ? help · q quit"
-	actions := "a adopt · e enable · d disable · r restore · PgUp/PgDn details · R refresh"
-	if m.pending != nil {
-		actions = "y apply changes · n/Esc cancel · PgUp/PgDn review"
-		footer = "Review the file changes before applying."
-	}
-	return strings.Join([]string{ansi.Truncate(header, w, "…"), ansi.Truncate(terminal.Safe(search), w, "…"), body, muted.Render(ansi.Truncate(status, w, "…")), ansi.Truncate(actions, w, "…"), muted.Render(ansi.Truncate(footer, w, "…"))}, "\n")
+	return strings.Join([]string{header, toolbar, body, m.statusLine(w), m.footer(w)}, "\n")
 }
-func (m Model) listView(width, height int) string {
+
+func (m Model) header(width int) string {
+	scope := strings.ToUpper(m.service.Scope())
+	location := "user library"
+	if m.service.Scope() == "project" {
+		location = filepath.Base(m.service.Config.Project)
+		if location == "." || location == string(filepath.Separator) {
+			location = m.service.Config.Project
+		}
+	}
+	left := brandStyle.Render(" SKMR ") + " " + accentStyle.Render(scope) + " " + mutedStyle.Render(terminal.Safe(location))
+	warnings := len(m.result.Issues)
+	for _, skill := range m.result.Skills {
+		warnings += len(skill.Issues)
+	}
+	right := fmt.Sprintf("%d skills", len(m.result.Skills))
+	if warnings > 0 {
+		right += "  " + warningStyle.Render(fmt.Sprintf("! %d", warnings))
+	}
+	return align(left, right, width)
+}
+
+func (m Model) toolbar(width int) string {
+	names := []string{"all", "managed", "discovered", "inherited"}
+	parts := []string{mutedStyle.Render("FILTER")}
+	for i, name := range names {
+		label := fmt.Sprintf("%d %s", i+1, name)
+		if i == m.filter {
+			parts = append(parts, selectedStyle.Render(" "+label+" "))
+		} else {
+			parts = append(parts, mutedStyle.Render(label))
+		}
+	}
+	query := "press / to search"
+	if m.query != "" || m.searching {
+		query = "/ " + terminal.Safe(m.query)
+		if m.searching {
+			query += accentStyle.Render("█")
+		}
+	}
+	return align(strings.Join(parts, "  "), mutedStyle.Render(query), width)
+}
+
+func (m Model) listPane(width, height int) string {
+	return frame(fmt.Sprintf("Skills %d/%d", len(m.items()), len(m.result.Skills)), m.listLines(width-2, height-2), width, height, true)
+}
+
+func (m Model) listLines(width, height int) []string {
 	items := m.items()
 	if len(items) == 0 {
-		return panel("No skills found.\nAdd a SKILL.md folder to a standard skill directory, then press R.", width, height, 0)
+		return fill([]string{"", mutedStyle.Render("  No matching skills"), "", "  Esc clear search  ·  f change filter"}, width, height)
 	}
 	start := max(0, m.cursor-height/2)
 	start = min(start, max(0, len(items)-height))
@@ -70,24 +112,222 @@ func (m Model) listView(width, height int) string {
 		if i == m.cursor {
 			prefix = "› "
 		}
-		text := ansi.Truncate(terminal.Safe(prefix+s.Name+"  ["+skillState(s)+"]"), width, "…")
+		state, style := compactState(s)
+		nameWidth := max(4, width-ansi.StringWidth(state)-3)
+		name := ansi.Truncate(terminal.Safe(s.Name), nameWidth, "…")
+		text := align(prefix+name, style.Render(state), width)
 		if i == m.cursor {
-			text = selected.Render(text)
+			text = selectedStyle.Render(pad(text, width))
 		}
 		lines = append(lines, text)
 	}
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-	return lipgloss.NewStyle().Width(width).Render(strings.Join(lines, "\n"))
+	return fill(lines, width, height)
 }
-func panel(text string, width, height, offset int) string {
-	text = strings.ReplaceAll(terminal.Safe(text), "\t", "    ")
-	lines := strings.Split(ansi.Hardwrap(text, max(1, width), true), "\n")
+
+func (m Model) detailPane(width, height int) string {
+	title := "Details"
+	if m.showHelp {
+		title = "Help"
+	}
+	return frame(title, m.detailLines(width-2, height-2), width, height, false)
+}
+
+func (m Model) detailLines(width, height int) []string {
+	if m.showHelp {
+		lines := []string{
+			accentStyle.Render("Navigate"),
+			"  ↑/k  up       ↓/j  down       g/G  first/last",
+			"  PgUp/PgDn scroll instructions",
+			"",
+			accentStyle.Render("Find and organize"),
+			"  /  search      f  cycle filter  Tab  switch scope",
+			"  R  refresh",
+			"",
+			accentStyle.Render("Manage selected skill"),
+			"  a  adopt       e  enable        d  disable",
+			"  r  restore     ?  close help    q  quit",
+			"",
+			mutedStyle.Render("Recovery: skmr doctor --recover"),
+		}
+		return scroll(fillWrapped(lines, width), width, height, m.offset)
+	}
+	s, ok := m.selected()
+	if !ok {
+		return fill([]string{"", mutedStyle.Render("  Nothing to show"), "", "  Esc clear search  ·  f change filter"}, width, height)
+	}
+	state, stateStyle := compactState(s)
+	lines := []string{align(accentStyle.Render(terminal.Safe(s.Name)), stateStyle.Render(state), width)}
+	if s.Description != "" {
+		lines = append(lines, wrap(terminal.Safe(s.Description), width)...)
+	}
+	lines = append(lines, "")
+	lines = append(lines, field("Source", terminal.Safe(s.Path), width)...)
+	lines = append(lines, field("Scope", terminal.Safe(s.Scope), width)...)
+	lines = append(lines, field("Agents", terminal.Safe(strings.Join(s.Agents, ", ")), width)...)
+	lines = append(lines, field("ID", terminal.Safe(s.ID), width)...)
+	if len(s.Issues) > 0 {
+		lines = append(lines, "", warningStyle.Render(fmt.Sprintf("! Problems (%d)", len(s.Issues))))
+		for _, issue := range s.Issues {
+			lines = append(lines, wrap("  "+terminal.Safe(issue), width)...)
+		}
+	}
+	lines = append(lines, "", section("SKILL.md", width))
+	content := strings.ReplaceAll(terminal.Safe(m.content), "\t", "    ")
+	if content == "" {
+		content = "Loading preview…"
+	}
+	lines = append(lines, wrap(content, width)...)
+	return scroll(lines, width, height, m.offset)
+}
+
+func (m Model) reviewView(width, height int) string {
+	title := "Confirm " + m.pending.Action
+	lines := []string{
+		warningStyle.Render("Review every filesystem change before applying."),
+		"",
+	}
+	lines = append(lines, wrap(terminal.Safe(m.pending.String()), max(1, width-4))...)
+	lines = append(lines, "", successStyle.Render("y apply changes")+"  "+mutedStyle.Render("n/Esc cancel"))
+	return frame(title, scroll(lines, width-2, height-2, m.offset), width, height, true)
+}
+
+func (m Model) statusLine(width int) string {
+	message := terminal.Safe(m.message)
+	style := mutedStyle
+	prefix := "●"
+	if m.busy {
+		prefix = "◌"
+		style = accentStyle
+	} else if strings.HasPrefix(message, "Done:") {
+		prefix = "✓"
+		style = successStyle
+	} else if strings.Contains(strings.ToLower(message), "could not") || strings.Contains(strings.ToLower(message), "error") {
+		prefix = "!"
+		style = errorStyle
+	}
+	if len(m.result.Issues) > 0 {
+		message += "  " + fmt.Sprintf("! %s", terminal.Safe(m.result.Issues[0]))
+	}
+	return ansi.Truncate(style.Render(prefix+" "+message), width, "…")
+}
+
+func (m Model) footer(width int) string {
+	if m.pending != nil {
+		return hints(width, [][2]string{{"y", "apply"}, {"n", "cancel"}, {"PgUp/Dn", "review"}, {"q", "quit"}})
+	}
+	if m.searching {
+		return hints(width, [][2]string{{"type", "search"}, {"Enter", "accept"}, {"Esc", "finish"}, {"⌫", "delete"}})
+	}
+	return hints(width, [][2]string{{"↑↓", "select"}, {"/", "search"}, {"a", "adopt"}, {"e/d", "toggle"}, {"r", "restore"}, {"?", "help"}, {"q", "quit"}})
+}
+
+func compactState(skill skills.Skill) (string, lipgloss.Style) {
+	if len(skill.Issues) > 0 {
+		return "! warning", warningStyle
+	}
+	if skill.Inherited {
+		return "↳ inherited", mutedStyle
+	}
+	if skill.ReadOnly {
+		return "◇ read-only", mutedStyle
+	}
+	if skill.Managed && skill.Enabled {
+		return "● enabled", successStyle
+	}
+	if skill.Managed {
+		return "○ disabled", mutedStyle
+	}
+	return "· discovered", labelStyle
+}
+
+func frame(title string, lines []string, width, height int, active bool) string {
+	width = max(3, width)
+	height = max(3, height)
+	inner := width - 2
+	color := borderColor
+	if active {
+		color = cyan
+	}
+	border := lipgloss.NewStyle().Foreground(color)
+	titleText := ansi.Truncate(" "+terminal.Safe(title)+" ", max(1, inner-1), "…")
+	topFill := max(0, inner-ansi.StringWidth(titleText))
+	out := []string{border.Render("╭─") + accentStyle.Render(titleText) + border.Render(strings.Repeat("─", max(0, topFill-1))+"╮")}
+	lines = fill(lines, inner, height-2)
+	for _, line := range lines {
+		out = append(out, border.Render("│")+pad(line, inner)+border.Render("│"))
+	}
+	out = append(out, border.Render("╰"+strings.Repeat("─", inner)+"╯"))
+	return strings.Join(out, "\n")
+}
+
+func field(label, value string, width int) []string {
+	prefix := labelStyle.Render(fmt.Sprintf("%-7s", label))
+	available := max(1, width-7)
+	parts := wrap(value, available)
+	lines := make([]string, 0, len(parts))
+	for i, part := range parts {
+		if i == 0 {
+			lines = append(lines, prefix+part)
+		} else {
+			lines = append(lines, strings.Repeat(" ", 7)+part)
+		}
+	}
+	return lines
+}
+
+func section(title string, width int) string {
+	text := " " + title + " "
+	return labelStyle.Render(text + strings.Repeat("─", max(0, width-len(text))))
+}
+
+func hints(width int, values [][2]string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, keyStyle.Render(" "+value[0]+" ")+" "+mutedStyle.Render(value[1]))
+	}
+	return ansi.Truncate(strings.Join(parts, "  "), width, "…")
+}
+
+func fillWrapped(lines []string, width int) []string {
+	out := []string{}
+	for _, line := range lines {
+		out = append(out, wrap(line, width)...)
+	}
+	return out
+}
+
+func wrap(value string, width int) []string {
+	return strings.Split(ansi.Hardwrap(value, max(1, width), true), "\n")
+}
+
+func scroll(lines []string, width, height, offset int) []string {
 	offset = min(max(0, offset), max(0, len(lines)-height))
 	lines = lines[offset:min(len(lines), offset+height)]
+	return fill(lines, width, height)
+}
+
+func fill(lines []string, width, height int) []string {
+	if len(lines) > height {
+		lines = lines[:height]
+	}
 	for len(lines) < height {
 		lines = append(lines, "")
 	}
-	return lipgloss.NewStyle().Width(width).Render(strings.Join(lines, "\n"))
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], width, "…")
+	}
+	return lines
+}
+
+func align(left, right string, width int) string {
+	gap := width - ansi.StringWidth(left) - ansi.StringWidth(right)
+	if gap < 1 {
+		return ansi.Truncate(left, max(1, width-ansi.StringWidth(right)-1), "…") + " " + right
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func pad(value string, width int) string {
+	value = ansi.Truncate(value, width, "…")
+	return value + strings.Repeat(" ", max(0, width-ansi.StringWidth(value)))
 }

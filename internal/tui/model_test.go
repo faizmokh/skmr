@@ -163,3 +163,25 @@ func TestScopeSwitch(t *testing.T) {
 		}
 	}
 }
+
+func TestViewHierarchyHelpAndDirectFilters(t *testing.T) {
+	m := model(t)
+	m.content = "# Alpha\nInstructions"
+	m.width, m.height = 100, 24
+	view := m.View()
+	for _, want := range []string{"SKMR", "Skills 2/2", "Details", "discovered", "SKILL.md", "press / to search"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q", want)
+		}
+	}
+
+	m, _ = key(m, "?")
+	if view = m.View(); !strings.Contains(view, "Help") || !strings.Contains(view, "Navigate") {
+		t.Fatal("help pane not shown")
+	}
+
+	m, _ = key(m, "2")
+	if m.filter != 1 || len(m.items()) != 0 {
+		t.Fatal("direct filter shortcut failed")
+	}
+}
