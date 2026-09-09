@@ -46,7 +46,7 @@ func New(s *manager.Service) Model {
 	return Model{service: s, project: s.Config.Project, width: 100, height: 30, busy: true, message: "Reading skill directories…"}
 }
 func Run(s *manager.Service) error {
-	_, err := tea.NewProgram(New(s), tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(New(s), tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	return err
 }
 func (m Model) Init() tea.Cmd { return m.load() }
@@ -136,6 +136,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = true
 		return m, m.load()
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
 		key := msg.String()
 		if key == "ctrl+c" {
@@ -279,4 +281,77 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.busy || m.width < 30 || m.height < 10 {
+		return m, nil
+	}
+	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+		delta := 3
+		if msg.Button == tea.MouseButtonWheelUp {
+			delta = -3
+		}
+		if m.pending != nil || !m.mouseInList(msg.X, msg.Y) {
+			m.offset = max(0, m.offset+delta)
+			return m, nil
+		}
+		m.cursor = min(max(0, m.cursor+delta), max(0, len(m.items())-1))
+		return m, m.selection()
+	}
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	if msg.Y == 0 && msg.X >= 7 && msg.X < 18 {
+		return m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if msg.Y == 1 {
+		if filter := m.filterAt(msg.X); filter >= 0 {
+			m.filter = filter
+			m.cursor = 0
+			return m, m.selection()
+		}
+		if msg.X >= m.searchStart() {
+			m.searching = true
+			return m, nil
+		}
+	}
+	if index, ok := m.skillAt(msg.X, msg.Y); ok {
+		m.cursor = index
+		return m, m.selection()
+	}
+	if msg.Y == m.height-1 {
+		if key := m.footerKeyAt(msg.X); key != "" {
+			return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		}
+	}
+	return m, nil
+}
+
+func (m Model) mouseInList(x, y int) bool {
+	if y < 2 || y >= 2+m.bodyHeight() {
+		return false
+	}
+	if m.width >= wideLayoutWidth {
+		return x < m.listWidth()
+	}
+	return y < 2+m.stackedListHeight()
+}
+
+func (m Model) skillAt(x, y int) (int, bool) {
+	if !m.mouseInList(x, y) {
+		return 0, false
+	}
+	contentHeight := m.bodyHeight() - 2
+	if m.width < wideLayoutWidth {
+		contentHeight = m.stackedListHeight() - 2
+	}
+	row := y - 3
+	if row < 0 || row >= contentHeight {
+		return 0, false
+	}
+	start := max(0, m.cursor-contentHeight/2)
+	start = min(start, max(0, len(m.items())-contentHeight))
+	index := start + row
+	return index, index >= 0 && index < len(m.items())
 }

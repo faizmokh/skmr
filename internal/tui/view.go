@@ -31,6 +31,12 @@ var (
 	keyStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("237")).Bold(true)
 )
 
+const wideLayoutWidth = 76
+
+type shortcut struct {
+	key, label, event string
+}
+
 func (m Model) View() string {
 	w, h := m.width, m.height
 	if w < 30 || h < 10 {
@@ -38,15 +44,15 @@ func (m Model) View() string {
 	}
 	header := m.header(w)
 	toolbar := m.toolbar(w)
-	bodyHeight := max(6, h-4)
+	bodyHeight := m.bodyHeight()
 	var body string
 	if m.pending != nil {
 		body = m.reviewView(w, bodyHeight)
-	} else if w >= 76 {
-		left := min(44, max(32, w*2/5))
+	} else if w >= wideLayoutWidth {
+		left := m.listWidth()
 		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listPane(left, bodyHeight), m.detailPane(w-left, bodyHeight))
 	} else {
-		listHeight := min(max(4, len(m.items())+2), max(3, bodyHeight/2))
+		listHeight := m.stackedListHeight()
 		body = m.listPane(w, listHeight) + "\n" + m.detailPane(w, max(3, bodyHeight-listHeight))
 	}
 	return strings.Join([]string{header, toolbar, body, m.statusLine(w), m.footer(w)}, "\n")
@@ -92,6 +98,40 @@ func (m Model) toolbar(width int) string {
 		}
 	}
 	return align(strings.Join(parts, "  "), mutedStyle.Render(query), width)
+}
+
+func (m Model) bodyHeight() int { return max(6, m.height-4) }
+
+func (m Model) listWidth() int { return min(44, max(32, m.width*2/5)) }
+
+func (m Model) stackedListHeight() int {
+	return min(max(4, len(m.items())+2), max(3, m.bodyHeight()/2))
+}
+
+func (m Model) filterAt(x int) int {
+	position := ansi.StringWidth("FILTER  ")
+	for i, name := range []string{"all", "managed", "discovered", "inherited"} {
+		width := ansi.StringWidth(fmt.Sprintf("%d %s", i+1, name))
+		if i == m.filter {
+			width += 2
+		}
+		if x >= position && x < position+width {
+			return i
+		}
+		position += width + 2
+	}
+	return -1
+}
+
+func (m Model) searchStart() int {
+	query := "press / to search"
+	if m.query != "" || m.searching {
+		query = "/ " + terminal.Safe(m.query)
+		if m.searching {
+			query += "█"
+		}
+	}
+	return max(0, m.width-ansi.StringWidth(query))
 }
 
 func (m Model) listPane(width, height int) string {
@@ -146,6 +186,10 @@ func (m Model) detailLines(width, height int) []string {
 			accentStyle.Render("Manage selected skill"),
 			"  a  adopt       e  enable        d  disable",
 			"  r  restore     ?  close help    q  quit",
+			"",
+			accentStyle.Render("Mouse"),
+			"  Click skills, filters, scope, search, or footer actions",
+			"  Scroll the list or the detail/review pane",
 			"",
 			mutedStyle.Render("Recovery: skmr doctor --recover"),
 		}
@@ -212,13 +256,33 @@ func (m Model) statusLine(width int) string {
 }
 
 func (m Model) footer(width int) string {
+	return hints(width, m.shortcuts())
+}
+
+func (m Model) shortcuts() []shortcut {
 	if m.pending != nil {
-		return hints(width, [][2]string{{"y", "apply"}, {"n", "cancel"}, {"PgUp/Dn", "review"}, {"q", "quit"}})
+		return []shortcut{{"y", "apply", "y"}, {"n", "cancel", "n"}, {"PgUp/Dn", "review", ""}, {"q", "quit", "q"}}
 	}
 	if m.searching {
-		return hints(width, [][2]string{{"type", "search"}, {"Enter", "accept"}, {"Esc", "finish"}, {"⌫", "delete"}})
+		return []shortcut{{"type", "search", ""}, {"Enter", "accept", "enter"}, {"Esc", "finish", "esc"}, {"⌫", "delete", "backspace"}}
 	}
-	return hints(width, [][2]string{{"↑↓", "select"}, {"/", "search"}, {"a", "adopt"}, {"e/d", "toggle"}, {"r", "restore"}, {"?", "help"}, {"q", "quit"}})
+	toggle := "e"
+	if skill, ok := m.selected(); ok && skill.Managed && skill.Enabled {
+		toggle = "d"
+	}
+	return []shortcut{{"↑↓", "select", ""}, {"/", "search", "/"}, {"a", "adopt", "a"}, {"e/d", "toggle", toggle}, {"r", "restore", "r"}, {"?", "help", "?"}, {"q", "quit", "q"}}
+}
+
+func (m Model) footerKeyAt(x int) string {
+	position := 0
+	for _, item := range m.shortcuts() {
+		width := ansi.StringWidth(" " + item.key + "  " + item.label)
+		if x >= position && x < position+width {
+			return item.event
+		}
+		position += width + 2
+	}
+	return ""
 }
 
 func compactState(skill skills.Skill) (string, lipgloss.Style) {
@@ -280,10 +344,10 @@ func section(title string, width int) string {
 	return labelStyle.Render(text + strings.Repeat("─", max(0, width-len(text))))
 }
 
-func hints(width int, values [][2]string) string {
+func hints(width int, values []shortcut) string {
 	parts := make([]string, 0, len(values))
 	for _, value := range values {
-		parts = append(parts, keyStyle.Render(" "+value[0]+" ")+" "+mutedStyle.Render(value[1]))
+		parts = append(parts, keyStyle.Render(" "+value.key+" ")+" "+mutedStyle.Render(value.label))
 	}
 	return ansi.Truncate(strings.Join(parts, "  "), width, "…")
 }

@@ -89,6 +89,8 @@ Read commands produce JSON only on stdout with `--json`. Human-readable errors g
 | `PgUp` / `PgDn` | Scroll instructions or the change preview |
 | `R`, `?`, `q` | Refresh, toggle help, quit |
 
+Mouse-capable terminals can click skills, filters, scope, search, and footer actions. The scroll wheel moves through the skill list or the active detail/review pane.
+
 ## Files and ownership
 
 Global storage:

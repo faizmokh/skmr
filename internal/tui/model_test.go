@@ -185,3 +185,42 @@ func TestViewHierarchyHelpAndDirectFilters(t *testing.T) {
 		t.Fatal("direct filter shortcut failed")
 	}
 }
+
+func TestMouseSelectionFiltersSearchAndScrolling(t *testing.T) {
+	m := model(t)
+	m.width, m.height = 100, 24
+
+	next, cmd := m.Update(tea.MouseMsg{X: 2, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = next.(Model)
+	if skill, _ := m.selected(); skill.Name != "beta" || cmd == nil {
+		t.Fatal("list click did not select the second skill")
+	}
+
+	next, _ = m.Update(tea.MouseMsg{X: 18, Y: 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = next.(Model)
+	if m.filter != 1 {
+		t.Fatal("filter click did not select managed skills")
+	}
+
+	m.filter = 0
+	next, _ = m.Update(tea.MouseMsg{X: 99, Y: 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = next.(Model)
+	if !m.searching {
+		t.Fatal("search click did not enter search mode")
+	}
+
+	m.searching = false
+	m.cursor = 0
+	next, cmd = m.Update(tea.MouseMsg{X: 2, Y: 4, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	m = next.(Model)
+	if m.cursor != 1 || cmd == nil {
+		t.Fatal("list wheel did not move selection")
+	}
+
+	m.offset = 0
+	next, _ = m.Update(tea.MouseMsg{X: 70, Y: 8, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	m = next.(Model)
+	if m.offset != 3 {
+		t.Fatal("detail wheel did not scroll preview")
+	}
+}
