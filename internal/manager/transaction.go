@@ -42,6 +42,28 @@ type Comparison struct {
 func (p Plan) String() string {
 	r := p.Record
 	var lines []string
+	if p.Action == "resolve" {
+		for _, origin := range r.Origins {
+			if origin.Canonical {
+				lines = append(lines, "Keep:    "+origin.Path)
+			} else {
+				lines = append(lines, "Back up: "+origin.Path)
+			}
+		}
+		for _, path := range r.Links {
+			lines = append(lines, "Link:    "+path)
+		}
+		for _, comparison := range p.Comparisons {
+			lines = append(lines, "Differences in "+comparison.Path)
+			if len(comparison.Differences) == 0 {
+				lines = append(lines, "  None")
+			}
+			for _, difference := range comparison.Differences {
+				lines = append(lines, "  "+difference)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
 	for _, move := range p.Moves {
 		verb := "Move "
 		if p.Action == "restore" {
@@ -64,17 +86,20 @@ func (p Plan) String() string {
 	for _, comparison := range p.Comparisons {
 		lines = append(lines, "Compare with "+comparison.Path)
 		if len(comparison.Differences) == 0 {
-			lines = append(lines, "  identical package")
+			lines = append(lines, "  same package contents")
 		}
 		for _, difference := range comparison.Differences {
 			lines = append(lines, "  "+difference)
 		}
 	}
+	if p.Action == "restore" && len(r.Origins) == 1 && len(r.Links) == 1 && r.Origins[0].Path == r.Links[0] {
+		lines = append(lines, "Result: unmanaged skill remains normally discoverable at "+r.Origins[0].Path)
+	}
 	return strings.Join(lines, "\n")
 }
 
 func (s *Service) Preview(action, arg string) (Plan, error) {
-	if !absent(filepath.Join(s.Store, "journal.json")) {
+	if s.hasPending() {
 		return Plan{}, fmt.Errorf("an interrupted operation needs recovery; run doctor --recover")
 	}
 	return s.preview(action, arg)
@@ -86,6 +111,20 @@ func (s *Service) preview(action, arg string) (Plan, error) {
 	}
 	p := Plan{Version: Version, Action: action, Before: m}
 	if action == "adopt" {
+		path, pathErr := filepath.Abs(arg)
+		if pathErr != nil {
+			return Plan{}, pathErr
+		}
+		path = filepath.Clean(path)
+		result, listErr := s.List()
+		if listErr != nil {
+			return Plan{}, listErr
+		}
+		for _, item := range result.Skills {
+			if item.Path == path && item.ConflictID != "" {
+				return s.resolutionFromResult(item.ID, m, result)
+			}
+		}
 		p.Record, err = s.adoption(arg, m)
 		if err != nil {
 			return Plan{}, err
@@ -187,6 +226,12 @@ func (s *Service) Apply(plan Plan) error {
 }
 
 func (s *Service) Recover() error {
+	if !absent(filepath.Join(s.Store, "transfer.json")) {
+		return s.recoverTransfer()
+	}
+	if !absent(filepath.Join(s.Store, "batch.json")) {
+		return s.recoverBatch()
+	}
 	unlock, err := s.lock()
 	if err != nil {
 		return err

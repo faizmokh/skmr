@@ -158,14 +158,14 @@ func (s *Service) validate(r Record) error {
 		if origin.Canonical {
 			canonical++
 			if origin.Path != r.Original || origin.Backup != "" {
-				return fmt.Errorf("invalid canonical origin for %s", r.ID)
+				return fmt.Errorf("invalid kept copy for %s", r.ID)
 			}
 		} else if origin.Backup == "" || !within(filepath.Join(s.Store, "library", r.ID, ".skmr-duplicates"), origin.Backup) {
 			return fmt.Errorf("invalid duplicate backup for %s", r.ID)
 		}
 	}
 	if canonical != 1 {
-		return fmt.Errorf("missing canonical origin for %s", r.ID)
+		return fmt.Errorf("missing kept copy for %s", r.ID)
 	}
 	return nil
 }

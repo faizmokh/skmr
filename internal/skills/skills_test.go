@@ -105,7 +105,7 @@ func TestNonRegularDocument(t *testing.T) {
 	}
 }
 
-func TestDigestIncludesContentModesAndSymlinkTargets(t *testing.T) {
+func TestDigestIncludesContentAndSymlinkTargetsButNotPermissions(t *testing.T) {
 	one := filepath.Join(t.TempDir(), "skill")
 	two := filepath.Join(t.TempDir(), "skill")
 	for _, path := range []string{one, two} {
@@ -132,13 +132,16 @@ func TestDigestIncludesContentModesAndSymlinkTargets(t *testing.T) {
 	if err = os.Chmod(filepath.Join(two, "run.sh"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	if err = os.Chmod(two, 0700); err != nil {
+		t.Fatal(err)
+	}
 	modeDigest, err := Digest(two)
-	if err != nil || modeDigest == oneDigest {
-		t.Fatal("permission change missing from digest", err)
+	if err != nil || modeDigest != oneDigest {
+		t.Fatal("permissions changed a content digest", err)
 	}
 	differences, err = Differences(one, two)
-	if err != nil || !strings.Contains(strings.Join(differences, "\n"), "changed: run.sh") {
-		t.Fatal("permission change missing from comparison", differences, err)
+	if err != nil || len(differences) != 0 {
+		t.Fatal("permissions produced a content difference", differences, err)
 	}
 	if err = os.Remove(filepath.Join(two, "run")); err != nil {
 		t.Fatal(err)
@@ -149,5 +152,45 @@ func TestDigestIncludesContentModesAndSymlinkTargets(t *testing.T) {
 	linkDigest, err := Digest(two)
 	if err != nil || linkDigest == modeDigest {
 		t.Fatal("symlink target change missing from digest", err)
+	}
+	differences, err = Differences(one, two)
+	if err != nil || !strings.Contains(strings.Join(differences, "\n"), "changed: run") {
+		t.Fatal("symlink target change missing from comparison", differences, err)
+	}
+}
+
+func TestSnapshotDifferencesUsesSizeBeforeReadingContent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	one := filepath.Join(t.TempDir(), "skill")
+	two := filepath.Join(t.TempDir(), "skill")
+	write(t, one, "one")
+	write(t, two, "longer")
+	oneFile := filepath.Join(one, "SKILL.md")
+	twoFile := filepath.Join(two, "SKILL.md")
+	if err := os.Chmod(oneFile, 0000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(twoFile, 0000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(oneFile, 0644)
+	defer os.Chmod(twoFile, 0644)
+
+	left, err := Snapshot(one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := Snapshot(two)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left.MetadataDigest() == right.MetadataDigest() {
+		t.Fatal("file size difference missing from metadata")
+	}
+	differences, err := SnapshotDifferences(left, right)
+	if err != nil || !strings.Contains(strings.Join(differences, "\n"), "changed: SKILL.md") {
+		t.Fatal("size fast path read file contents", differences, err)
 	}
 }

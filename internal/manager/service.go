@@ -18,12 +18,27 @@ func (s *Service) List() (skills.Result, error) {
 		return skills.Result{}, err
 	}
 	out := skills.Scan(s.Roots)
+	if s.Config.Project != "" {
+		projects := append([]string{s.Config.Project}, s.ancestors...)
+		for i := range out.Skills {
+			if out.Skills[i].Scope != "project" {
+				continue
+			}
+			for _, project := range projects {
+				if within(project, out.Skills[i].Path) {
+					out.Skills[i].OwnerProject = project
+					break
+				}
+			}
+		}
+	}
 	type scoped struct {
 		m         Manifest
 		inherited bool
 		scope     string
+		project   string
 	}
-	sets := []scoped{{m, false, s.Scope()}}
+	sets := []scoped{{m, false, s.Scope(), s.Config.Project}}
 
 	if s.Config.Project != "" {
 		configs := []Config{{Home: s.Config.Home, DataHome: s.Config.DataHome, ConfigHome: s.Config.ConfigHome}}
@@ -42,8 +57,8 @@ func (s *Service) List() (skills.Result, error) {
 				out.Issues = append(out.Issues, inherited.Store+": "+err.Error())
 				continue
 			}
-			sets = append(sets, scoped{im, true, inherited.Scope()})
-			if !absent(filepath.Join(inherited.Store, "journal.json")) {
+			sets = append(sets, scoped{im, true, inherited.Scope(), inherited.Config.Project})
+			if inherited.hasPending() {
 				out.Issues = append(out.Issues, "Interrupted operation in inherited library: "+inherited.Store+"; run doctor --recover in its owning scope")
 			}
 		}
@@ -52,11 +67,13 @@ func (s *Service) List() (skills.Result, error) {
 	for _, set := range sets {
 		for _, r := range set.m.Records {
 			item := skills.Parse(r.Library)
+			item.Group = skills.GroupFor(r.Original, s.Roots)
 			item.ID = r.ID
 			item.Name = r.Name
 			item.Managed = true
 			item.Enabled = r.Enabled
 			item.Scope = set.scope
+			item.OwnerProject = set.project
 			item.Inherited = set.inherited
 			item.ReadOnly = set.inherited
 			for _, p := range r.Links {
@@ -104,7 +121,7 @@ func (s *Service) List() (skills.Result, error) {
 		}
 	}
 	annotateConflicts(&out, sets[0].m)
-	if !absent(filepath.Join(s.Store, "journal.json")) {
+	if s.hasPending() {
 		out.Issues = append(out.Issues, "Interrupted operation: run doctor --recover before making changes")
 	}
 	sort.Slice(out.Skills, func(i, j int) bool {
@@ -117,6 +134,7 @@ func (s *Service) List() (skills.Result, error) {
 }
 
 func annotateConflicts(out *skills.Result, current Manifest) {
+	out.Snapshots = map[string]*skills.PackageSnapshot{}
 	groups := map[string][]int{}
 	for i := range out.Skills {
 		groups[out.Skills[i].Name] = append(groups[out.Skills[i].Name], i)
@@ -138,7 +156,7 @@ func annotateConflicts(out *skills.Result, current Manifest) {
 			continue
 		}
 		kind := "identical"
-		digests := map[string]bool{}
+		metadataDigests := map[string]bool{}
 		unresolved := []string{}
 		for _, index := range indexes {
 			item := &out.Skills[index]
@@ -146,16 +164,49 @@ func annotateConflicts(out *skills.Result, current Manifest) {
 				kind = "external"
 				unresolved = append(unresolved, item.Path)
 			}
-			digest, err := skills.Digest(item.Path)
+			snapshot, err := skills.Snapshot(item.Path)
 			if err != nil {
 				kind = "external"
 				unresolved = append(unresolved, item.Path)
 				continue
 			}
-			digests[digest] = true
+			out.Snapshots[item.Path] = snapshot
+			metadataDigests[snapshot.MetadataDigest()] = true
 		}
-		if kind != "external" && len(digests) > 1 {
-			kind = "divergent"
+		if kind != "external" {
+			if len(metadataDigests) > 1 {
+				kind = "divergent"
+			} else {
+				digests := map[string]bool{}
+				for _, index := range indexes {
+					digest, err := out.Snapshots[out.Skills[index].Path].Digest()
+					if err != nil {
+						kind = "external"
+						unresolved = append(unresolved, out.Skills[index].Path)
+						break
+					}
+					digests[digest] = true
+				}
+				if kind != "external" && len(digests) > 1 {
+					kind = "divergent"
+				}
+			}
+		}
+		if kind == "divergent" {
+			contentDigests := map[string]bool{}
+			for _, index := range indexes {
+				path := out.Skills[index].Path
+				digest, err := out.Snapshots[path].ContentDigest()
+				if err != nil {
+					kind = "external"
+					unresolved = append(unresolved, path)
+					break
+				}
+				contentDigests[digest] = true
+			}
+			if kind != "external" && len(contentDigests) == 1 {
+				kind = "agent_config"
+			}
 		}
 		visibleCount := max(count, legacyLinks)
 		groupID := skills.ID("conflict:" + name)
@@ -166,9 +217,10 @@ func annotateConflicts(out *skills.Result, current Manifest) {
 			item.ConflictCount = visibleCount
 			item.Canonical = item.Managed
 			item.Unresolved = unique(unresolved)
-			message := fmt.Sprintf("%s conflict across %d discovery paths", strings.ToUpper(kind[:1])+kind[1:], visibleCount)
+			label := skills.ConflictLabel(kind)
+			message := fmt.Sprintf("%s%s found in %d locations", strings.ToUpper(label[:1]), label[1:], visibleCount)
 			if legacyLinks >= 2 && count == 1 {
-				message = "Identical conflict from redundant managed discovery links; resolve to keep only the shared path"
+				message = "Same copies found; adopt the copy you want to keep"
 			}
 			item.Issues = append(item.Issues, message)
 		}
@@ -223,7 +275,7 @@ func (s *Service) adoption(path string, m Manifest) (Record, error) {
 		return Record{}, err
 	}
 	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-		return Record{}, fmt.Errorf("adopt a real skill folder; existing links are read-only")
+		return Record{}, fmt.Errorf("adopt a real skill folder; linked skills are view only")
 	}
 	var match *agents.Root
 	for i, root := range s.Roots {
@@ -239,7 +291,7 @@ func (s *Service) adoption(path string, m Manifest) (Record, error) {
 	rel, _ := filepath.Rel(match.Path, p)
 	for _, part := range strings.Split(rel, string(filepath.Separator)) {
 		if part == ".system" || part == ".git" {
-			return Record{}, fmt.Errorf("externally managed skills are read-only")
+			return Record{}, fmt.Errorf("externally managed skills are view only")
 		}
 	}
 	for parent := filepath.Dir(p); parent != match.Path && within(match.Path, parent); parent = filepath.Dir(parent) {
@@ -253,7 +305,7 @@ func (s *Service) adoption(path string, m Manifest) (Record, error) {
 	}
 	for _, discovered := range skills.Scan(s.Roots).Skills {
 		if discovered.Name == item.Name && discovered.Path != p {
-			return Record{}, fmt.Errorf("duplicate skill name; use resolve %s to choose this copy as canonical", item.ID)
+			return Record{}, fmt.Errorf("duplicate skill name; adopt the copy you want to keep")
 		}
 	}
 	for _, r := range m.Records {
@@ -311,6 +363,11 @@ func (s *Service) resolution(id string, manifest Manifest) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
+	return s.resolutionFromResult(id, manifest, result)
+}
+
+func (s *Service) resolutionFromResult(id string, manifest Manifest, result skills.Result) (Plan, error) {
+	var err error
 	var selected *skills.Skill
 	for i := range result.Skills {
 		if result.Skills[i].ID == id {
@@ -322,15 +379,15 @@ func (s *Service) resolution(id string, manifest Manifest) (Plan, error) {
 		return Plan{}, fmt.Errorf("skill %q was not found; resolve requires an ID", id)
 	}
 	if selected.ReadOnly || selected.Inherited {
-		return Plan{}, fmt.Errorf("canonical skill must be writable in the current scope")
+		return Plan{}, fmt.Errorf("the selected copy is view only in this scope")
 	}
 	if selected.ConflictID == "" {
-		return Plan{}, fmt.Errorf("skill %q has no duplicate discovery conflict", selected.Name)
+		return Plan{}, fmt.Errorf("skill %q has no duplicate copies", selected.Name)
 	}
 	if !selected.Managed {
 		parsed := skills.Parse(selected.Path)
 		if len(parsed.Issues) > 0 {
-			return Plan{}, fmt.Errorf("canonical skill is invalid: %s", strings.Join(parsed.Issues, "; "))
+			return Plan{}, fmt.Errorf("the selected copy is invalid: %s", strings.Join(parsed.Issues, "; "))
 		}
 		if err = validateRelocation(selected.Path); err != nil {
 			return Plan{}, err
@@ -342,7 +399,15 @@ func (s *Service) resolution(id string, manifest Manifest) (Plan, error) {
 		if item.Name != selected.Name || item.ID == selected.ID || item.ReadOnly || item.Inherited {
 			continue
 		}
-		differences, compareErr := skills.Differences(selected.Path, item.Path)
+		var differences []string
+		left, leftOK := result.Snapshots[selected.Path]
+		right, rightOK := result.Snapshots[item.Path]
+		var compareErr error
+		if leftOK && rightOK {
+			differences, compareErr = skills.SnapshotDifferences(left, right)
+		} else {
+			differences, compareErr = skills.Differences(selected.Path, item.Path)
+		}
 		if compareErr != nil {
 			return Plan{}, compareErr
 		}
@@ -365,7 +430,7 @@ func (s *Service) resolution(id string, manifest Manifest) (Plan, error) {
 	shared := filepath.Join(s.Shared(), selected.Name)
 	if selected.Managed {
 		if existing == nil || existing.ID != selected.ID {
-			return Plan{}, fmt.Errorf("managed canonical record is missing")
+			return Plan{}, fmt.Errorf("managed copy record is missing")
 		}
 		plan.Record = *existing
 		plan.Record.Origins = append([]Origin{}, existing.Origins...)
@@ -465,7 +530,7 @@ func (s *Service) resolution(id string, manifest Manifest) (Plan, error) {
 	plan.Record.Links = []string{shared}
 	plan.Record.Enabled = true
 	if selected.Managed && len(plan.Moves) == 0 && len(plan.RemoveLinks) == 0 {
-		return Plan{}, fmt.Errorf("only read-only or inherited duplicates remain; skmr cannot suppress them")
+		return Plan{}, fmt.Errorf("only view-only copies or copies from other scopes remain; skmr cannot move them")
 	}
 
 	sharedWillMove := false

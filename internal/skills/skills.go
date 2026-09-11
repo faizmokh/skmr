@@ -18,11 +18,13 @@ import (
 )
 
 type Skill struct {
+	Group         *Group   `json:"group,omitempty"`
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
 	Description   string   `json:"description"`
 	Path          string   `json:"path"`
 	Scope         string   `json:"scope"`
+	OwnerProject  string   `json:"owner_project,omitempty"`
 	Agents        []string `json:"agents"`
 	Managed       bool     `json:"managed"`
 	Enabled       bool     `json:"enabled"`
@@ -37,8 +39,9 @@ type Skill struct {
 }
 
 type Result struct {
-	Skills []Skill  `json:"skills"`
-	Issues []string `json:"issues"`
+	Skills    []Skill                     `json:"skills"`
+	Issues    []string                    `json:"issues"`
+	Snapshots map[string]*PackageSnapshot `json:"-"`
 }
 
 var namePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
@@ -67,67 +70,49 @@ func Read(path string) ([]byte, error) {
 	return b, err
 }
 
-// Digest identifies package content and behavior-relevant metadata without
-// depending on timestamps, ownership, or the package's absolute location.
+// Digest identifies package content and structure without depending on
+// permissions, timestamps, ownership, or the package's absolute location.
 func Digest(path string) (string, error) {
-	entries, err := packageEntries(path)
+	snapshot, err := Snapshot(path)
 	if err != nil {
 		return "", err
 	}
-	h := sha256.New()
-	paths := make([]string, 0, len(entries))
-	for rel := range entries {
-		paths = append(paths, rel)
-	}
-	sort.Strings(paths)
-	for _, rel := range paths {
-		fmt.Fprintf(h, "%s\x00%s\x00", rel, entries[rel])
-	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
+	return snapshot.Digest()
 }
 
 // Differences returns stable, relative package differences from canonical to copy.
 func Differences(canonical, copy string) ([]string, error) {
-	left, err := packageEntries(canonical)
+	left, err := Snapshot(canonical)
 	if err != nil {
 		return nil, err
 	}
-	right, err := packageEntries(copy)
+	right, err := Snapshot(copy)
 	if err != nil {
 		return nil, err
 	}
-	paths := map[string]bool{}
-	for path := range left {
-		paths[path] = true
-	}
-	for path := range right {
-		paths[path] = true
-	}
-	ordered := make([]string, 0, len(paths))
-	for path := range paths {
-		if path != "." {
-			ordered = append(ordered, path)
-		}
-	}
-	sort.Strings(ordered)
-	differences := []string{}
-	for _, path := range ordered {
-		leftValue, inLeft := left[path]
-		rightValue, inRight := right[path]
-		switch {
-		case !inLeft:
-			differences = append(differences, "only in copy: "+path)
-		case !inRight:
-			differences = append(differences, "only in canonical: "+path)
-		case leftValue != rightValue:
-			differences = append(differences, "changed: "+path)
-		}
-	}
-	return differences, nil
+	return SnapshotDifferences(left, right)
 }
 
-func packageEntries(path string) (map[string]string, error) {
-	entries := map[string]string{}
+type packageEntry struct {
+	kind    string
+	size    int64
+	target  string
+	digest  string
+	hashed  bool
+	regular bool
+	symlink bool
+}
+
+// PackageSnapshot caches package metadata and content hashes for one operation.
+// It is excluded from Result JSON and must not be reused after the filesystem changes.
+type PackageSnapshot struct {
+	root    string
+	entries map[string]packageEntry
+}
+
+// Snapshot reads package structure and sizes without reading regular-file contents.
+func Snapshot(path string) (*PackageSnapshot, error) {
+	snapshot := &PackageSnapshot{root: path, entries: map[string]packageEntry{}}
 	err := filepath.WalkDir(path, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -140,39 +125,162 @@ func packageEntries(path string) (map[string]string, error) {
 		if err != nil {
 			return err
 		}
-		value := fmt.Sprintf("%s:%04o:", info.Mode().Type().String(), info.Mode().Perm())
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(current)
+		item := packageEntry{kind: info.Mode().Type().String(), regular: info.Mode().IsRegular(), symlink: info.Mode()&os.ModeSymlink != 0}
+		if item.regular {
+			item.size = info.Size()
+		}
+		if item.symlink {
+			item.target, err = os.Readlink(current)
 			if err != nil {
 				return err
 			}
-			entries[rel] = value + target
-			return nil
 		}
-		if !info.Mode().IsRegular() {
-			entries[rel] = value
-			return nil
-		}
-		file, err := os.Open(current)
-		if err != nil {
-			return err
-		}
-		contentHash := sha256.New()
-		_, copyErr := io.Copy(contentHash, file)
-		closeErr := file.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-		entries[rel] = value + fmt.Sprintf("%x", contentHash.Sum(nil))
+		snapshot.entries[rel] = item
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return entries, nil
+	return snapshot, nil
+}
+
+// MetadataDigest identifies paths, entry types, file sizes, and symlink targets.
+func (s *PackageSnapshot) MetadataDigest() string {
+	h := sha256.New()
+	for _, rel := range sortedEntryPaths(s.entries) {
+		item := s.entries[rel]
+		fmt.Fprintf(h, "%s\x00%s\x00%d\x00%s\x00", rel, item.kind, item.size, item.target)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// Digest reads regular files once and caches their content hashes.
+func (s *PackageSnapshot) Digest() (string, error) {
+	return s.digest(false)
+}
+
+// ContentDigest excludes agent configuration for copy classification only.
+// Transaction verification must continue using Digest.
+func (s *PackageSnapshot) ContentDigest() (string, error) {
+	return s.digest(true)
+}
+
+func (s *PackageSnapshot) digest(contentOnly bool) (string, error) {
+	configPath := filepath.Join("agents", "openai.yaml")
+	config, hasConfig := s.entries[configPath]
+	hasConfig = hasConfig && (config.regular || config.symlink)
+	configOnlyDirectory := hasConfig
+	for rel := range s.entries {
+		if strings.HasPrefix(rel, "agents"+string(filepath.Separator)) && rel != configPath {
+			configOnlyDirectory = false
+		}
+	}
+	h := sha256.New()
+	for _, rel := range sortedEntryPaths(s.entries) {
+		item := s.entries[rel]
+		if contentOnly && hasConfig && (rel == configPath || (rel == "agents" && configOnlyDirectory)) {
+			continue
+		}
+		value := item.kind + ":"
+		if item.symlink {
+			value += item.target
+		} else if item.regular {
+			digest, err := s.fileDigest(rel)
+			if err != nil {
+				return "", err
+			}
+			value += digest
+		}
+		fmt.Fprintf(h, "%s\x00%s\x00", rel, value)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// SnapshotDifferences compares snapshots and reuses any hashes already read.
+func SnapshotDifferences(left, right *PackageSnapshot) ([]string, error) {
+	paths := map[string]bool{}
+	for path := range left.entries {
+		paths[path] = true
+	}
+	for path := range right.entries {
+		paths[path] = true
+	}
+	ordered := make([]string, 0, len(paths))
+	for path := range paths {
+		if path != "." {
+			ordered = append(ordered, path)
+		}
+	}
+	sort.Strings(ordered)
+	differences := []string{}
+	for _, path := range ordered {
+		leftValue, inLeft := left.entries[path]
+		rightValue, inRight := right.entries[path]
+		switch {
+		case !inLeft:
+			differences = append(differences, "only in copy: "+path)
+		case !inRight:
+			differences = append(differences, "only in canonical: "+path)
+		case leftValue.kind != rightValue.kind || leftValue.size != rightValue.size || leftValue.target != rightValue.target:
+			differences = append(differences, "changed: "+path)
+		case leftValue.regular:
+			leftDigest, err := left.fileDigest(path)
+			if err != nil {
+				return nil, err
+			}
+			rightDigest, err := right.fileDigest(path)
+			if err != nil {
+				return nil, err
+			}
+			if leftDigest != rightDigest {
+				differences = append(differences, "changed: "+path)
+			}
+		}
+	}
+	return differences, nil
+}
+
+func sortedEntryPaths(entries map[string]packageEntry) []string {
+	paths := make([]string, 0, len(entries))
+	for rel := range entries {
+		paths = append(paths, rel)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func (s *PackageSnapshot) fileDigest(rel string) (string, error) {
+	item := s.entries[rel]
+	if item.hashed {
+		return item.digest, nil
+	}
+	path := filepath.Join(s.root, rel)
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return "", err
+	}
+	if !stat.Mode().IsRegular() || stat.Size() != item.size {
+		file.Close()
+		return "", fmt.Errorf("package changed while comparing: %s", path)
+	}
+	contentHash := sha256.New()
+	_, copyErr := io.Copy(contentHash, file)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	item.digest = fmt.Sprintf("%x", contentHash.Sum(nil))
+	item.hashed = true
+	s.entries[rel] = item
+	return item.digest, nil
 }
 
 func Parse(path string) Skill {
@@ -262,6 +370,7 @@ func Scan(roots []agents.Root) Result {
 				}
 				seen[path] = true
 				s := Parse(path)
+				s.Group = GroupFor(path, roots)
 				s.Scope = root.Scope
 				s.Agents = append([]string{}, root.Agents...)
 				s.Inherited = root.Inherited

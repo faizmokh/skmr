@@ -50,6 +50,205 @@ func apply(t *testing.T, s *Service, action, arg string) Plan {
 	}
 	return p
 }
+
+func projectService(t *testing.T, base *Service, name string) *Service {
+	t.Helper()
+	project := filepath.Join(base.Config.Home, name)
+	if err := os.MkdirAll(project, 0755); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(Config{Home: base.Config.Home, DataHome: base.Config.DataHome, ConfigHome: base.Config.ConfigHome, Project: project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func TestMoveGlobalToProjectAndStopManaging(t *testing.T) {
+	global, source := fixture(t)
+	record := apply(t, global, "adopt", source).Record
+	project := projectService(t, global, "app")
+	plan, err := global.PreviewTransfer("move", record.ID, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.String(), "Remove discovery link") || plan.DestinationRecord.ID != record.ID {
+		t.Fatalf("bad move preview: %+v", plan)
+	}
+	if err = global.ApplyTransfer(project, plan); err != nil {
+		t.Fatal(err)
+	}
+	globalManifest, _ := global.load()
+	projectManifest, _ := project.load()
+	if len(globalManifest.Records) != 0 || len(projectManifest.Records) != 1 {
+		t.Fatalf("ownership did not move: %+v %+v", globalManifest, projectManifest)
+	}
+	moved := projectManifest.Records[0]
+	if !owned(moved.Links[0], moved.Library) || !absent(record.Library) {
+		t.Fatal("move did not relocate content and discovery link")
+	}
+	apply(t, project, "restore", moved.ID)
+	if info, statErr := os.Lstat(filepath.Join(project.Config.Project, ".agents", "skills", moved.Name)); statErr != nil || !info.IsDir() {
+		t.Fatal("stop managing did not restore into destination scope", statErr)
+	}
+}
+
+func TestCopyBetweenProjectsIsIndependentAndPreservesDisabledState(t *testing.T) {
+	global, _ := fixture(t)
+	source := projectService(t, global, "source-project")
+	destination := projectService(t, global, "destination-project")
+	path := filepath.Join(source.Config.Project, ".agents", "skills", "project-sample")
+	skill(t, path)
+	record := apply(t, source, "adopt", path).Record
+	apply(t, source, "disable", record.ID)
+	plan, err := source.PreviewTransfer("copy", record.ID, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.DestinationRecord.ID == record.ID || plan.DestinationRecord.Enabled {
+		t.Fatalf("copy identity/state incorrect: %+v", plan.DestinationRecord)
+	}
+	if err = source.ApplyTransfer(destination, plan); err != nil {
+		t.Fatal(err)
+	}
+	if !absent(plan.DestinationRecord.Links[0]) || absent(record.Library) {
+		t.Fatal("disabled copy changed discovery or source content")
+	}
+	copiedScript, err := os.Stat(filepath.Join(plan.DestinationRecord.Library, "scripts", "run.sh"))
+	if err != nil || copiedScript.Mode().Perm() != 0751 {
+		t.Fatal("copy did not preserve executable permissions", err)
+	}
+	if target, linkErr := os.Readlink(filepath.Join(plan.DestinationRecord.Library, "run")); linkErr != nil || target != "scripts/run.sh" {
+		t.Fatal("copy did not preserve the internal symlink", linkErr)
+	}
+	if err = os.WriteFile(filepath.Join(plan.DestinationRecord.Library, "new.txt"), []byte("copy only"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !absent(filepath.Join(record.Library, "new.txt")) {
+		t.Fatal("copied packages are not independent")
+	}
+}
+
+func TestMoveProjectToGlobalAndBetweenProjects(t *testing.T) {
+	for _, destinationKind := range []string{"global", "project"} {
+		t.Run(destinationKind, func(t *testing.T) {
+			global, _ := fixture(t)
+			source := projectService(t, global, "move-source")
+			destination := global
+			if destinationKind == "project" {
+				destination = projectService(t, global, "move-destination")
+			}
+			path := filepath.Join(source.Config.Project, ".agents", "skills", "moving-skill")
+			skill(t, path)
+			record := apply(t, source, "adopt", path).Record
+			plan, err := source.PreviewTransfer("move", record.ID, destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = source.ApplyTransfer(destination, plan); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := destination.load()
+			if err != nil || len(manifest.Records) != 1 || manifest.Records[0].ID != record.ID {
+				t.Fatalf("move did not preserve ownership and ID: %+v %v", manifest, err)
+			}
+		})
+	}
+}
+
+func TestTransferValidation(t *testing.T) {
+	global, sourcePath := fixture(t)
+	record := apply(t, global, "adopt", sourcePath).Record
+	project := projectService(t, global, "validation-project")
+	if _, err := global.PreviewTransfer("copy", record.ID, project); err == nil || !strings.Contains(err.Error(), "already contains") {
+		t.Fatal("copy over inherited skill was accepted", err)
+	}
+	if _, err := global.PreviewTransfer("move", record.ID, global); err == nil || !strings.Contains(err.Error(), "same") {
+		t.Fatal("same-scope transfer was accepted", err)
+	}
+	overlapPath := filepath.Join(record.Library, "nested-project")
+	if err := os.MkdirAll(overlapPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	overlap, err := New(Config{Home: global.Config.Home, DataHome: global.Config.DataHome, ConfigHome: global.Config.ConfigHome, Project: overlapPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = global.PreviewTransfer("move", record.ID, overlap); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatal("overlapping destination was accepted", err)
+	}
+	manifest, err := global.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Records[0].Origins = append(manifest.Records[0].Origins, Origin{Path: filepath.Join(global.Config.Home, ".pi", "agent", "skills", "backup"), Backup: filepath.Join(global.Store, "library", record.ID, ".skmr-duplicates", "backup")})
+	if err = global.save(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = global.PreviewTransfer("move", record.ID, project); err == nil || !strings.Contains(err.Error(), "duplicate backups") {
+		t.Fatal("record with preserved duplicates was accepted", err)
+	}
+}
+
+func TestTransferRecoveryFromDestination(t *testing.T) {
+	for _, action := range []string{"move", "copy"} {
+		for _, stage := range []string{"journal", "content", "destination-manifest", "both-manifests"} {
+			t.Run(action+"/"+stage, func(t *testing.T) {
+				global, _ := fixture(t)
+				source := projectService(t, global, "recover-source")
+				destination := projectService(t, global, "recover-destination")
+				path := filepath.Join(source.Config.Project, ".agents", "skills", "recover-skill")
+				skill(t, path)
+				record := apply(t, source, "adopt", path).Record
+				plan, err := source.PreviewTransfer(action, record.ID, destination)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = mkdir(source.Store); err != nil {
+					t.Fatal(err)
+				}
+				if err = mkdir(destination.Store); err != nil {
+					t.Fatal(err)
+				}
+				if err = atomicJSON(filepath.Join(source.Store, "transfer.json"), plan); err != nil {
+					t.Fatal(err)
+				}
+				if err = atomicJSON(filepath.Join(destination.Store, "transfer.json"), plan); err != nil {
+					t.Fatal(err)
+				}
+				if stage != "journal" {
+					if err = executeTransfer(source, destination, plan); err != nil {
+						t.Fatal(err)
+					}
+				}
+				destinationAfter := plan.DestinationBefore
+				destinationAfter.Records = append(destinationAfter.Records, plan.DestinationRecord)
+				if stage == "destination-manifest" || stage == "both-manifests" {
+					if err = destination.save(destinationAfter); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if stage == "both-manifests" && action == "move" {
+					sourceAfter := plan.SourceBefore
+					sourceAfter.Records = []Record{}
+					if err = source.save(sourceAfter); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err = destination.Recover(); err != nil {
+					t.Fatal(err)
+				}
+				if source.hasPending() || destination.hasPending() {
+					t.Fatal("recovery did not clear both journals")
+				}
+				manifest, err := destination.load()
+				if err != nil || len(manifest.Records) != 1 {
+					t.Fatalf("destination manifest not recovered: %+v %v", manifest, err)
+				}
+			})
+		}
+	}
+}
 func TestLifecycle(t *testing.T) {
 	for _, scope := range []string{"global", "project"} {
 		t.Run(scope, func(t *testing.T) {
@@ -150,12 +349,13 @@ func TestAdoptSharedAndRestoreDisabled(t *testing.T) {
 		t.Fatal("restore disabled failed", e)
 	}
 }
-func TestCollisionDoesNotOverwrite(t *testing.T) {
+func TestAdoptKeepsSelectedCopyWhenSharedPathConflicts(t *testing.T) {
 	s, p := fixture(t)
 	shared := filepath.Join(s.Shared(), "sample")
 	skill(t, shared)
-	if _, e := s.Preview("adopt", p); e == nil {
-		t.Fatal("collision accepted")
+	plan, e := s.Preview("adopt", p)
+	if e != nil || plan.Action != "resolve" || len(plan.Record.Origins) != 2 {
+		t.Fatalf("duplicate adoption did not create a keep-copy plan: %+v %v", plan, e)
 	}
 	if !absent(s.Store) {
 		t.Fatal("preview wrote state")
@@ -678,6 +878,9 @@ func TestConflictClassificationAndResolutionLifecycle(t *testing.T) {
 	s, canonicalPath := fixture(t)
 	duplicatePath := filepath.Join(s.Config.ConfigHome, "opencode", "skills", "sample")
 	skill(t, duplicatePath)
+	if err := os.Chmod(duplicatePath, 0700); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := s.List()
 	if err != nil {
@@ -691,8 +894,9 @@ func TestConflictClassificationAndResolutionLifecycle(t *testing.T) {
 			t.Fatalf("missing identical conflict metadata: %+v", item)
 		}
 	}
-	if _, err = s.Preview("adopt", canonicalPath); err == nil || !strings.Contains(err.Error(), "use resolve") {
-		t.Fatal("duplicate adoption did not direct user to resolve", err)
+	adoptPlan, err := s.Preview("adopt", canonicalPath)
+	if err != nil || adoptPlan.Action != "resolve" || len(adoptPlan.Record.Origins) != 2 {
+		t.Fatalf("duplicate adoption did not create a keep-copy plan: %+v %v", adoptPlan, err)
 	}
 
 	if err = os.WriteFile(filepath.Join(duplicatePath, "different.txt"), []byte("keep this variant"), 0640); err != nil {

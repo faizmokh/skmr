@@ -68,7 +68,7 @@ func New(build BuildInfo) *cobra.Command {
 	})
 	for _, kind := range []string{"list", "show", "doctor"} {
 		var asJSON, recover bool
-		cmd := &cobra.Command{Use: kind, Short: map[string]string{"list": "List discovered and managed skills", "show": "Show a skill and its instructions", "doctor": "Check links, conflicts, and interrupted operations"}[kind], Args: cobra.NoArgs}
+		cmd := &cobra.Command{Use: kind, Short: map[string]string{"list": "List available and managed skills", "show": "Show a skill and its instructions", "doctor": "Check links, copies, and interrupted operations"}[kind], Args: cobra.NoArgs}
 		if kind == "show" {
 			cmd.Use = "show <id>"
 			cmd.Args = cobra.ExactArgs(1)
@@ -100,7 +100,7 @@ func New(build BuildInfo) *cobra.Command {
 					fmt.Fprintln(table, "ID\tNAME\tSCOPE\tSTATUS\tAGENTS")
 				}
 				for _, item := range result.Skills {
-					fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n", item.ID, oneLine(item.Name), item.Scope, status(item), strings.Join(item.Agents, ","))
+					fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n", item.ID, oneLine(item.Name), displayScope(item), status(item), strings.Join(item.Agents, ","))
 				}
 				if e = table.Flush(); e != nil {
 					return e
@@ -129,7 +129,7 @@ func New(build BuildInfo) *cobra.Command {
 						Content string       `json:"content"`
 					}{item, string(content)})
 				}
-				fmt.Fprintf(out, "%s · %s · %s\n%s\nAgents: %s\n", oneLine(item.Name), item.Scope, status(item), terminal.Safe(item.Path), strings.Join(item.Agents, ", "))
+				fmt.Fprintf(out, "%s · %s · %s\n%s\nAgents: %s\n", oneLine(item.Name), displayScope(item), status(item), terminal.Safe(item.Path), strings.Join(item.Agents, ", "))
 				for _, issue := range item.Issues {
 					fmt.Fprintln(out, "Warning:", terminal.Safe(issue))
 				}
@@ -165,15 +165,114 @@ func New(build BuildInfo) *cobra.Command {
 		}
 		root.AddCommand(cmd)
 	}
-	for _, action := range []string{"adopt", "resolve", "enable", "disable", "restore"} {
-		var yes, dry bool
-		arg := "<id>"
-		if action == "adopt" {
-			arg = "<path>"
+	{
+		var yes, dry, all bool
+		cmd := &cobra.Command{
+			Use:   "adopt <path>...",
+			Short: "Move existing skills into the managed library",
+			Args: func(cmd *cobra.Command, args []string) error {
+				if all && len(args) > 0 {
+					return fmt.Errorf("use --all or explicit paths, not both")
+				}
+				if !all && len(args) == 0 {
+					return fmt.Errorf("provide at least one skill path or use --all")
+				}
+				return nil
+			},
 		}
-		cmd := &cobra.Command{Use: action + " " + arg, Short: map[string]string{"adopt": "Move an existing skill into the managed library", "resolve": "Choose the canonical copy of a conflicting skill", "enable": "Create shared discovery links for a managed skill", "disable": "Remove discovery links, keeping the library copy", "restore": "Return an adopted skill to its original location"}[action], Args: cobra.ExactArgs(1)}
+		cmd.Flags().BoolVar(&all, "all", false, "Adopt every safe unmanaged skill in this scope")
 		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview changes without writing files")
-		if action == "adopt" || action == "resolve" || action == "restore" {
+		cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the preview without prompting")
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			s, err := service()
+			if err != nil {
+				return err
+			}
+			paths := append([]string{}, args...)
+			if all {
+				result, listErr := s.List()
+				if listErr != nil {
+					return listErr
+				}
+				paths = manager.SafeAdoptionPaths(result)
+				conflicts := manager.SortedConflictNames(result)
+				if len(conflicts) > 0 {
+					fmt.Fprintf(cmd.OutOrStdout(), "Skipped duplicate-name skills: %s. Pass one path for each copy you want to keep.\n", strings.Join(conflicts, ", "))
+				}
+				if len(paths) == 0 {
+					fmt.Fprintln(cmd.OutOrStdout(), "No safe unmanaged skills to add.")
+					return nil
+				}
+			}
+
+			if len(paths) == 1 {
+				plan, previewErr := s.Preview("adopt", paths[0])
+				if previewErr != nil {
+					return previewErr
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+				if dry {
+					return nil
+				}
+				if !yes {
+					if !isTerminal(cmd.InOrStdin()) {
+						return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
+					}
+					fmt.Fprint(cmd.OutOrStdout(), "Apply these changes? [y/N] ")
+					response, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+					if readErr != nil {
+						return readErr
+					}
+					response = strings.ToLower(strings.TrimSpace(response))
+					if response != "y" && response != "yes" {
+						fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
+						return nil
+					}
+				}
+				if err = s.Apply(plan); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Done: adopted %s.\n", oneLine(plan.Record.Name))
+				return nil
+			}
+
+			plan, err := s.PreviewBatchAdopt(paths)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+			if dry {
+				return nil
+			}
+			if !yes {
+				if !isTerminal(cmd.InOrStdin()) {
+					return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
+				}
+				fmt.Fprint(cmd.OutOrStdout(), "Apply these changes? [y/N] ")
+				response, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if readErr != nil {
+					return readErr
+				}
+				response = strings.ToLower(strings.TrimSpace(response))
+				if response != "y" && response != "yes" {
+					fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
+					return nil
+				}
+			}
+			if err = s.ApplyBatch(plan); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Done: added %d skills to the library.\n", len(plan.Plans))
+			return nil
+		}
+		root.AddCommand(cmd)
+	}
+	for _, action := range []string{"resolve", "enable", "disable", "restore"} {
+		var yes, dry bool
+		cmd := &cobra.Command{Use: action + " <id>", Short: map[string]string{"resolve": "Keep one copy and back up the others", "enable": "Create shared discovery links for a managed skill", "disable": "Remove discovery links, keeping the library copy", "restore": "Return an adopted skill to its original location"}[action], Args: cobra.ExactArgs(1)}
+		cmd.Hidden = action == "resolve"
+		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview changes without writing files")
+		if action == "resolve" || action == "restore" {
 			cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the preview without prompting")
 		}
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -189,7 +288,7 @@ func New(build BuildInfo) *cobra.Command {
 			if dry {
 				return nil
 			}
-			if (action == "adopt" || action == "resolve" || action == "restore") && !yes {
+			if (action == "resolve" || action == "restore") && !yes {
 				if !isTerminal(cmd.InOrStdin()) {
 					return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
 				}
@@ -212,7 +311,80 @@ func New(build BuildInfo) *cobra.Command {
 		}
 		root.AddCommand(cmd)
 	}
+	for _, action := range []string{"move", "copy"} {
+		var yes, dry, toGlobal bool
+		var toProject string
+		cmd := &cobra.Command{
+			Use:   action + " <id>",
+			Short: map[string]string{"move": "Move a managed skill to another scope", "copy": "Copy a managed skill independently to another scope"}[action],
+			Args:  cobra.ExactArgs(1),
+		}
+		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview changes without writing files")
+		cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the preview without prompting")
+		cmd.Flags().BoolVar(&toGlobal, "to-global", false, "Use the global library as the destination")
+		cmd.Flags().StringVar(&toProject, "to-project", "", "Use a project library as the destination; accepts 'auto'")
+		cmd.MarkFlagsMutuallyExclusive("to-global", "to-project")
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			if toGlobal == (toProject != "") {
+				return fmt.Errorf("set exactly one of --to-global or --to-project")
+			}
+			source, err := service()
+			if err != nil {
+				return err
+			}
+			destinationProject := toProject
+			if toGlobal {
+				destinationProject = ""
+			}
+			destination, err := manager.New(manager.Config{Home: source.Config.Home, DataHome: source.Config.DataHome, ConfigHome: source.Config.ConfigHome, Project: destinationProject})
+			if err != nil {
+				return err
+			}
+			plan, err := source.PreviewTransfer(action, args[0], destination)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+			if dry {
+				return nil
+			}
+			if !yes {
+				if !isTerminal(cmd.InOrStdin()) {
+					return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
+				}
+				fmt.Fprint(cmd.OutOrStdout(), "Apply these changes? [y/N] ")
+				response, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if readErr != nil {
+					return readErr
+				}
+				response = strings.ToLower(strings.TrimSpace(response))
+				if response != "y" && response != "yes" {
+					fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
+					return nil
+				}
+			}
+			if err = source.ApplyTransfer(destination, plan); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Done: %s %s to %s.\n", action, oneLine(plan.SourceRecord.Name), scopeName(destination))
+			return nil
+		}
+		root.AddCommand(cmd)
+	}
 	return root
+}
+
+func scopeName(s *manager.Service) string {
+	if s.Config.Project == "" {
+		return "global"
+	}
+	return s.Config.Project
+}
+func displayScope(s skills.Skill) string {
+	if s.OwnerProject != "" {
+		return "project:" + oneLine(s.OwnerProject)
+	}
+	return s.Scope
 }
 func oneLine(s string) string {
 	return strings.NewReplacer("\n", " ", "\t", " ").Replace(terminal.Safe(s))
@@ -224,7 +396,7 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 func status(s skills.Skill) string {
-	state := "discovered"
+	state := "available"
 	if s.Managed {
 		if s.Enabled {
 			state = "enabled"
@@ -235,10 +407,10 @@ func status(s skills.Skill) string {
 	if s.Inherited {
 		state += " / inherited"
 	} else if s.ReadOnly {
-		state += " / read-only"
+		state += " / view only"
 	}
 	if s.ConflictKind != "" {
-		state += " / conflict:" + s.ConflictKind
+		state += " / " + skills.ConflictLabel(s.ConflictKind)
 	}
 	return state
 }

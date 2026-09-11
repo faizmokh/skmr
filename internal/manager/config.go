@@ -120,6 +120,9 @@ func (s *Service) Shared() string {
 	}
 	return filepath.Join(base, ".agents", "skills")
 }
+func (s *Service) hasPending() bool {
+	return !absent(filepath.Join(s.Store, "journal.json")) || !absent(filepath.Join(s.Store, "batch.json")) || !absent(filepath.Join(s.Store, "transfer.json"))
+}
 func within(root, path string) bool {
 	rel, err := filepath.Rel(root, path)
 	return err == nil && rel != ".." && !filepath.IsAbs(rel) && !startsParent(rel)

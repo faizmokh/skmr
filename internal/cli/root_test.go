@@ -39,6 +39,38 @@ func run(args ...string) (string, error) {
 	e := root.Execute()
 	return out.String(), e
 }
+
+func TestHumanStatusLabelsPreserveJSONValues(t *testing.T) {
+	tests := []struct {
+		skill skills.Skill
+		want  string
+	}{
+		{skills.Skill{}, "available"},
+		{skills.Skill{ReadOnly: true}, "available / view only"},
+		{skills.Skill{Managed: true, Enabled: true}, "enabled"},
+		{skills.Skill{Managed: true}, "disabled"},
+		{skills.Skill{ConflictKind: "identical"}, "available / same copies"},
+		{skills.Skill{ConflictKind: "agent_config"}, "available / same content, different agent config"},
+		{skills.Skill{ConflictKind: "divergent"}, "available / different copies"},
+		{skills.Skill{ConflictKind: "external"}, "available / view-only copies"},
+		{skills.Skill{ConflictKind: "future"}, "available / copy conflict"},
+	}
+	for _, test := range tests {
+		if got := status(test.skill); got != test.want {
+			t.Errorf("status(%+v) = %q, want %q", test.skill, got, test.want)
+		}
+	}
+
+	data, err := json.Marshal(skills.Skill{ReadOnly: true, ConflictKind: "divergent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"read_only":true`) || !strings.Contains(text, `"conflict_kind":"divergent"`) {
+		t.Fatalf("JSON compatibility changed: %s", text)
+	}
+}
+
 func TestListShowAndDryRun(t *testing.T) {
 	p := setup(t)
 	out, e := run("list", "--json")
@@ -75,6 +107,60 @@ func TestListShowAndDryRun(t *testing.T) {
 	}
 	if _, e = run("restore", id, "--yes"); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestMoveAndCopyCommands(t *testing.T) {
+	path := setup(t)
+	if _, err := run("adopt", path, "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run("list", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result skills.Result
+	if err = json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	id := result.Skills[0].ID
+	project := filepath.Join(os.Getenv("HOME"), "app")
+	other := filepath.Join(os.Getenv("HOME"), "other")
+	if err = os.MkdirAll(project, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(other, 0755); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("move", id, "--to-project", project, "--dry-run")
+	if err != nil || !strings.Contains(out, "Destination scope: project "+project) {
+		t.Fatalf("bad move dry run: %s %v", out, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(project, ".skmr")); !os.IsNotExist(statErr) {
+		t.Fatal("move dry run created destination state")
+	}
+	if _, err = run("move", id, "--to-project", project, "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("list", "--project", project, "--json")
+	if err != nil || !strings.Contains(out, `"owner_project": "`+project+`"`) {
+		t.Fatalf("owner project missing: %s %v", out, err)
+	}
+	if _, err = run("copy", id, "--project", project, "--to-project", other, "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("list", "--project", other, "--json")
+	if err != nil || !strings.Contains(out, `"managed": true`) {
+		t.Fatalf("copied skill missing: %s %v", out, err)
+	}
+}
+
+func TestTransferRequiresOneDestination(t *testing.T) {
+	setup(t)
+	for _, args := range [][]string{{"move", "id"}, {"copy", "id", "--to-global", "--to-project", "auto"}} {
+		if _, err := run(args...); err == nil {
+			t.Fatal("expected destination error", args)
+		}
 	}
 }
 func TestHelpAndErrors(t *testing.T) {
@@ -125,7 +211,7 @@ func TestDoctorExitStatus(t *testing.T) {
 	}
 }
 
-func TestResolveJSONDryRunAndNoninteractiveUse(t *testing.T) {
+func TestAdoptDuplicateDryRunAndNoninteractiveUse(t *testing.T) {
 	shared := setup(t)
 	home := os.Getenv("HOME")
 	duplicate := filepath.Join(home, ".codex", "skills", "sample")
@@ -144,30 +230,91 @@ func TestResolveJSONDryRunAndNoninteractiveUse(t *testing.T) {
 	if err = json.Unmarshal([]byte(out), &result); err != nil {
 		t.Fatal(err)
 	}
-	var canonicalID string
 	for _, item := range result.Skills {
-		if item.Path == shared {
-			canonicalID = item.ID
-		}
 		if item.ConflictKind != "divergent" || item.ConflictCount != 2 {
 			t.Fatalf("missing conflict JSON: %+v", item)
 		}
 	}
-	out, err = run("resolve", canonicalID, "--dry-run")
-	if err != nil || !strings.Contains(out, "Move ") || !strings.Contains(out, "Create link ") {
+	out, err = run("adopt", shared, "--dry-run")
+	if err != nil || !strings.Contains(out, "Keep:    "+shared) || !strings.Contains(out, "Back up: "+duplicate) || !strings.Contains(out, "Link:    "+shared) {
 		t.Fatal(out, err)
 	}
 	if _, err = os.Stat(filepath.Join(os.Getenv("XDG_DATA_HOME"), "skmr")); !os.IsNotExist(err) {
-		t.Fatal("resolve dry run wrote state")
+		t.Fatal("duplicate adoption dry run wrote state")
 	}
-	if _, err = run("resolve", canonicalID); err == nil || !strings.Contains(err.Error(), "--yes") {
-		t.Fatal("noninteractive resolution must require --yes", err)
+	if _, err = run("adopt", shared); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatal("noninteractive duplicate adoption must require --yes", err)
 	}
-	if _, err = run("resolve", canonicalID, "--yes"); err != nil {
+	if _, err = run("adopt", shared, "--yes"); err != nil {
 		t.Fatal(err)
 	}
 	out, err = run("list", "--json")
 	if err != nil || !strings.Contains(out, `"managed": true`) || strings.Contains(out, `"conflict_id"`) {
-		t.Fatalf("resolution did not clear writable conflict: %s %v", out, err)
+		t.Fatalf("adoption did not clear writable conflict: %s %v", out, err)
+	}
+}
+
+func TestAdoptMultiplePathsAndAll(t *testing.T) {
+	first := setup(t)
+	home := os.Getenv("HOME")
+	second := filepath.Join(home, ".pi", "agent", "skills", "second")
+	if err := os.MkdirAll(second, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "SKILL.md"), []byte("---\nname: second\ndescription: Second skill\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run("adopt", first, second, "--dry-run")
+	if err != nil || !strings.Contains(out, "Add 2 skills") || !strings.Contains(out, "sample") || !strings.Contains(out, "second") {
+		t.Fatalf("bad multi-path preview: %s %v", out, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(os.Getenv("XDG_DATA_HOME"), "skmr")); !os.IsNotExist(statErr) {
+		t.Fatal("multi-path dry run wrote state")
+	}
+	if _, err = run("adopt", first, second); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatal("multi-path noninteractive use did not require --yes", err)
+	}
+	if _, err = run("adopt", first, second, "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("list", "--json")
+	if err != nil || strings.Count(out, `"managed": true`) != 2 {
+		t.Fatalf("batch adoption missing: %s %v", out, err)
+	}
+}
+
+func TestAdoptAllSkipsDuplicateNames(t *testing.T) {
+	shared := setup(t)
+	home := os.Getenv("HOME")
+	duplicate := filepath.Join(home, ".codex", "skills", "sample")
+	unique := filepath.Join(home, ".codex", "skills", "unique")
+	for path, content := range map[string]string{
+		duplicate: "---\nname: sample\ndescription: Another copy\n---\n",
+		unique:    "---\nname: unique\ndescription: Unique skill\n---\n",
+	} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := run("adopt", "--all", "--dry-run")
+	if err != nil || !strings.Contains(out, "Skipped duplicate-name skills: sample") || !strings.Contains(out, "unique") || strings.Contains(out, "Move "+shared) {
+		t.Fatalf("bad --all preview: %s %v", out, err)
+	}
+	if _, err = run("adopt", "--all", shared); err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatal("--all accepted an explicit path", err)
+	}
+}
+
+func TestAdoptAllWithNoSafeSkills(t *testing.T) {
+	path := setup(t)
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run("adopt", "--all")
+	if err != nil || !strings.Contains(out, "No safe unmanaged skills to add.") {
+		t.Fatalf("unexpected empty --all result: %s %v", out, err)
 	}
 }
