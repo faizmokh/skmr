@@ -121,7 +121,7 @@ func (s *Service) Shared() string {
 	return filepath.Join(base, ".agents", "skills")
 }
 func (s *Service) hasPending() bool {
-	return !absent(filepath.Join(s.Store, "journal.json")) || !absent(filepath.Join(s.Store, "batch.json")) || !absent(filepath.Join(s.Store, "transfer.json"))
+	return !absent(filepath.Join(s.Store, "journal.json")) || !absent(filepath.Join(s.Store, "batch.json")) || !absent(filepath.Join(s.Store, "transfer.json")) || !absent(filepath.Join(s.Store, "packages-journal.json"))
 }
 func within(root, path string) bool {
 	rel, err := filepath.Rel(root, path)

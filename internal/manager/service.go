@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -120,6 +121,9 @@ func (s *Service) List() (skills.Result, error) {
 			out.Skills = append(out.Skills, item)
 		}
 	}
+	if s.Config.Project != "" {
+		s.annotateInstalledPackages(&out)
+	}
 	annotateConflicts(&out, sets[0].m)
 	if s.hasPending() {
 		out.Issues = append(out.Issues, "Interrupted operation: run doctor --recover before making changes")
@@ -131,6 +135,51 @@ func (s *Service) List() (skills.Result, error) {
 		return out.Skills[i].Name < out.Skills[j].Name
 	})
 	return out, nil
+}
+
+func (s *Service) annotateInstalledPackages(out *skills.Result) {
+	packages, err := s.loadPackages()
+	if err != nil {
+		out.Issues = append(out.Issues, err.Error())
+		return
+	}
+	resolved, resolveErr := s.resolvePackages(packages.Requests)
+	if resolveErr != nil {
+		out.Issues = append(out.Issues, "Project packages: "+resolveErr.Error())
+	} else if !reflect.DeepEqual(resolved, packages) {
+		out.Issues = append(out.Issues, "Project package resolution is stale; run skmr sync")
+	}
+	for _, installed := range packages.Skills {
+		link := filepath.Join(s.Shared(), installed.Name)
+		target := s.centralLibrary(installed)
+		filtered := out.Skills[:0]
+		for _, item := range out.Skills {
+			if item.Path == link || item.Inherited && item.Managed && item.ID == installed.ID {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		out.Skills = filtered
+		item := skills.Parse(target)
+		item.ID = installed.ID
+		item.Name = installed.Name
+		item.Path = link
+		item.Scope = "project"
+		item.OwnerProject = s.Config.Project
+		item.Agents = append([]string{}, agents.All...)
+		item.Installed = true
+		item.Enabled = owned(link, target)
+		item.ReadOnly = true
+		if absent(target) {
+			item.Issues = append(item.Issues, "Central package is missing: "+target)
+		}
+		if absent(link) {
+			item.Issues = append(item.Issues, "Missing project package link")
+		} else if !owned(link, target) {
+			item.Issues = append(item.Issues, "Project package link is occupied by unrelated content")
+		}
+		out.Skills = append(out.Skills, item)
+	}
 }
 
 func annotateConflicts(out *skills.Result, current Manifest) {

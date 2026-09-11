@@ -10,7 +10,7 @@ Developers managing directory-based agent skills for Codex, OpenCode, and Pi fro
 
 ## Product Purpose
 
-skmr provides one local library and one consistent CLI/TUI workflow for discovering, adopting, enabling, disabling, and restoring agent skills. Success means users can understand the current state quickly and apply deliberate changes without losing content or ownership information.
+skmr provides one local package library and one consistent CLI/TUI workflow for discovering, adopting, enabling, disabling, restoring, and installing agent skills into projects. Named groups bundle related project dependencies. Success means users can understand the current state quickly and apply deliberate changes without losing content or ownership information.
 
 ## Brand Personality
 

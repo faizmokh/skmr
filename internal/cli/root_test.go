@@ -49,6 +49,7 @@ func TestHumanStatusLabelsPreserveJSONValues(t *testing.T) {
 		{skills.Skill{ReadOnly: true}, "available / view only"},
 		{skills.Skill{Managed: true, Enabled: true}, "enabled"},
 		{skills.Skill{Managed: true}, "disabled"},
+		{skills.Skill{Installed: true, ReadOnly: true}, "installed"},
 		{skills.Skill{ConflictKind: "identical"}, "available / same copies"},
 		{skills.Skill{ConflictKind: "agent_config"}, "available / same content, different agent config"},
 		{skills.Skill{ConflictKind: "divergent"}, "available / different copies"},
@@ -193,6 +194,69 @@ func TestVersion(t *testing.T) {
 		t.Fatalf("unexpected short version output: %q", out)
 	}
 }
+
+func TestAddGroupUsesCurrentGitProject(t *testing.T) {
+	source := setup(t)
+	if _, err := run("adopt", source, "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run("disable", "sample"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run("group", "create", "backend", "sample"); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(os.Getenv("HOME"), "repo")
+	if err := os.MkdirAll(filepath.Join(project, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	out, err := run("add", "@backend")
+	if err != nil || !strings.Contains(out, "project now has 1 skills") {
+		t.Fatalf("group add failed: %s %v", out, err)
+	}
+	link := filepath.Join(project, ".agents", "skills", "sample")
+	if _, err = os.Readlink(link); err != nil {
+		t.Fatal("project skill link missing", err)
+	}
+	out, err = run("group", "list", "--json")
+	if err != nil || !strings.Contains(out, `"name": "backend"`) {
+		t.Fatalf("group list failed: %s %v", out, err)
+	}
+	if _, err = run("remove", "@backend"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatal("project skill link was not removed")
+	}
+}
+
+func TestAddRequiresGitOrExplicitProject(t *testing.T) {
+	source := setup(t)
+	if _, err := run("adopt", source, "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chdir(outside); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	if _, err = run("add", "sample"); err == nil || !strings.Contains(err.Error(), "outside Git") {
+		t.Fatal("add outside Git did not require --project", err)
+	}
+}
+
 func TestDoctorExitStatus(t *testing.T) {
 	p := setup(t)
 	out, e := run("doctor", "--json")

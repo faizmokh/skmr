@@ -27,6 +27,7 @@ type Skill struct {
 	OwnerProject  string   `json:"owner_project,omitempty"`
 	Agents        []string `json:"agents"`
 	Managed       bool     `json:"managed"`
+	Installed     bool     `json:"installed,omitempty"`
 	Enabled       bool     `json:"enabled"`
 	Inherited     bool     `json:"inherited"`
 	ReadOnly      bool     `json:"read_only"`

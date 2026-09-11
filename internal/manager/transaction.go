@@ -232,6 +232,9 @@ func (s *Service) Recover() error {
 	if !absent(filepath.Join(s.Store, "batch.json")) {
 		return s.recoverBatch()
 	}
+	if !absent(filepath.Join(s.Store, "packages-journal.json")) {
+		return s.recoverPackages()
+	}
 	unlock, err := s.lock()
 	if err != nil {
 		return err

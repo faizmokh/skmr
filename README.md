@@ -1,8 +1,8 @@
 # skmr
 
-A local skill library for **Codex, OpenCode, and Pi**, with a scriptable CLI and a keyboard-driven TUI. Written in Go; supports macOS and Linux.
+`skmr` is a local skill manager for Codex, OpenCode, and Pi.
 
-skmr discovers existing `SKILL.md` packages, lets you adopt selected folders into a central library, and enables them through the agents' shared `.agents/skills` directory. It runs entirely offline and never executes skill instructions or helper scripts.
+It stores skills in one library. You can make a skill global, install it in one project, or install a group of related skills. It works offline and never runs skill instructions or scripts.
 
 ## Install
 
@@ -12,189 +12,269 @@ With Homebrew:
 brew install faizmokh/tap/skmr
 ```
 
-With Go:
+With Go 1.25 or newer:
 
 ```sh
 go install github.com/faizmokh/skmr/cmd/skmr@latest
 ```
 
-## Build and run
+Run `skmr` to open the TUI. Run `skmr list` to use the CLI.
 
-Requires Go 1.25 or later.
+## Main ideas
 
-```sh
-go build -o bin/skmr ./cmd/skmr
-./bin/skmr          # TUI when attached to a terminal; help otherwise
-./bin/skmr list
-```
+- **Library:** the central store for your skills.
+- **Global skill:** a library skill available in every project.
+- **Project skill:** a library skill available in one project only.
+- **Group:** a named set of skills installed together.
 
-Alternatively, run `go install ./cmd/skmr` from a source checkout.
+Keeping unused skills out of the global scope gives agents a smaller skill list.
 
-## First use
+## Quick start
 
-Launch `skmr` to open the interactive library. On a new global setup, skmr finds writable local skills and opens a checklist. Safe skills are selected by default, duplicate names wait for you to choose the copy to keep, and Codex system and plugin-cache skills are ignored.
+### Store an existing skill
+
+First, see what `skmr` found:
 
 ```sh
 skmr list
-skmr show <id>
-skmr adopt ~/.codex/skills/my-skill --dry-run
-skmr adopt ~/.codex/skills/my-skill
-skmr adopt ~/.codex/skills/one ~/.pi/agent/skills/two
-skmr adopt --all --dry-run
-skmr adopt --all --yes
-skmr disable <id>
-skmr enable <id>
-skmr move <id> --to-project ./my-project
-skmr copy <id> --project ./my-project --to-global
-skmr restore <id>
 ```
 
-`adopt`, `move`, `copy`, and `restore` print their exact move/link changes and ask for confirmation. `adopt` accepts multiple paths; `adopt --all` selects every valid writable skill with a unique name and reports duplicate-name groups that need an explicit path choice. Use `--yes` after reviewing the preview in scripts. `enable` and `disable` apply directly. Every write command supports `--dry-run`, which creates no directories or state.
-
-Use an ID from `list`, or an unambiguous skill name. Adoption takes the path to the containing folder, not to `SKILL.md`. skmr adopts existing folders from standard discovery directories; it does not import arbitrary folders, fetch repositories, edit skills, or manage plugin lifecycles.
-
-### Scopes
-
-Global scope is the default. `--global` makes it explicit.
+Then move a skill into the library:
 
 ```sh
-skmr list --project ./my-project
-skmr list --project auto        # nearest Git root from the current directory
-skmr adopt ./my-project/.pi/skills/my-skill --project ./my-project
-skmr move <id> --global --to-project ./my-project
-skmr move <id> --project ./my-project --to-global
-skmr copy <id> --project ./my-project --to-project ../other-project
-skmr tui --project ./my-project
+skmr adopt ~/.agents/skills/my-skill --dry-run
+skmr adopt ~/.agents/skills/my-skill --yes
 ```
 
-An explicit project directory is required outside Git. Project views include global and ancestor skills as inherited, view-only entries. Changes apply only to the selected scope. Nested project selection includes ancestors up to the nearest Git root; outside Git, discovery continues to the filesystem root. Managed global and ancestor-project skills remain visible as inherited entries even when disabled. Interrupted operations in inherited libraries are reported with the owning library path; recover them from that scope.
+To adopt all safe skills:
 
-### Commands
+```sh
+skmr adopt --all --dry-run
+skmr adopt --all --yes
+```
 
-| Command | Purpose |
+An adopted skill stays global until you disable it.
+
+### Keep a skill out of the global scope
+
+```sh
+skmr disable my-skill
+```
+
+The skill stays in the library but is no longer global. To make it global again:
+
+```sh
+skmr enable my-skill
+```
+
+### Install a skill in a project
+
+```sh
+cd my-project
+skmr add my-skill
+```
+
+`add` uses the nearest Git root. `install` is an alias:
+
+```sh
+skmr install my-skill
+```
+
+To target another folder:
+
+```sh
+skmr add my-skill --project ../other-project
+```
+
+Outside Git, `--project <path>` is required.
+
+Remove a skill that was added directly:
+
+```sh
+skmr remove my-skill
+```
+
+Repair missing links and refresh group contents:
+
+```sh
+skmr sync
+```
+
+## Groups
+
+A group is a reusable list of skills. Groups are stored in your personal library and can be used in any project.
+
+Create one:
+
+```sh
+skmr group create swift \
+  swift-concurrency-expert \
+  swiftui-ui-patterns
+```
+
+Install or remove the whole group:
+
+```sh
+skmr add @swift
+skmr remove @swift
+```
+
+Groups can include existing groups:
+
+```sh
+skmr group create ios @swift ios-debugger-agent
+```
+
+List or delete groups:
+
+```sh
+skmr group list
+skmr group delete ios
+```
+
+The group holds the membership list; skills are not tagged with a group. To change a group today, delete it and create it again.
+
+If two requests need the same skill, `skmr` installs it once. Removing one request keeps the skill while another request still needs it.
+
+## Commands
+
+### Find and check skills
+
+| Command | Action |
 | --- | --- |
-| `list [--json]` | Inventory, IDs, agent visibility, scope, and problems |
-| `show <id> [--json]` | Metadata, source path, and skill instructions |
-| `adopt <path>... [--yes]` | Keep the selected copies, back up duplicates, and manage the skills |
-| `adopt --all [--yes]` | Adopt every safe unmanaged skill in the current scope |
-| `enable <id>` | Create the shared discovery link |
-| `disable <id>` | Remove owned discovery links; keep library content |
-| `move <id> <destination>` | Transfer ownership using `--to-global` or `--to-project <path>` |
-| `copy <id> <destination>` | Create an independent managed copy in another scope |
-| `restore <id> [--yes]` | Move content back and stop managing it |
-| `doctor [--json]` | Diagnose invalid skills, broken links, duplicates, and recovery needs |
-| `doctor --recover` | Resume an interrupted operation, then diagnose |
-| `tui` | Open the interactive library |
-| `version` | Show version, commit, and build date |
+| `skmr list` | List found and managed skills |
+| `skmr list --json` | Print the list as JSON |
+| `skmr show <name-or-id>` | Show one skill and its instructions |
+| `skmr doctor` | Check skills, links, and unfinished work |
 
-### Duplicate copies
+### Manage the library
 
-Skills with the same name appear as copies. **Same copies** have matching contents. **Same content, different agent config** means only `agents/openai.yaml` differs or is missing (including its otherwise-empty parent directory). **Different copies** have other differences in files, paths, entry types, or link targets. Agent configuration remains visible in comparisons and is preserved during adoption and restoration. File and folder permissions do not affect this comparison. **View-only copies** include at least one copy that skmr cannot move automatically.
+| Command | Action |
+| --- | --- |
+| `skmr adopt <path>...` | Move skills into the library |
+| `skmr adopt --all` | Adopt every safe skill in the scope |
+| `skmr enable <name-or-id>` | Make a library skill available |
+| `skmr disable <name-or-id>` | Hide a skill but keep it stored |
+| `skmr restore <name-or-id>` | Put a skill back and stop managing it |
 
-Structured JSON keeps its existing field names and values for compatibility.
+### Manage project skills
 
-Run `skmr adopt <path> --dry-run` on the copy you want to keep. After review, rerun with `--yes`. skmr moves writable alternatives into tracked backup storage and leaves only `.agents/skills/<name>` discoverable. Restoring the managed skill returns every preserved copy to its original path.
+| Command | Action |
+| --- | --- |
+| `skmr add <skill>...` | Install skills in the current project |
+| `skmr add @<group>` | Install a group in the current project |
+| `skmr remove <skill-or-@group>...` | Remove direct project requests |
+| `skmr sync` | Match project links to its saved requests |
+| `skmr group create <name> <members>...` | Create a group |
+| `skmr group list` | List groups |
+| `skmr group delete <name>` | Delete a group |
 
-Read commands produce JSON only on stdout with `--json`. Human-readable errors go to stderr. Exit status is `0` for success (including cancellation) and `1` for errors; `doctor` also returns `1` when problems are found. JSON skill content is escaped JSON; human-readable output strips terminal control sequences.
+### Move and copy managed skills
 
-### TUI keys
+```sh
+skmr move <id> --to-project ./my-project
+skmr move <id> --project ./my-project --to-global
+skmr copy <id> --project ./one --to-project ./two
+```
 
-The TUI is a skill library and discovery controller. **Library** skills are stored by skmr in the current scope and can be enabled or disabled through the shared discovery folder. **Other folders** contains local skills that skmr found but does not store. In project scope, **Parent scopes** contains global and ancestor-project skills that are visible here but owned elsewhere.
+`move` changes which library owns the skill. `copy` makes a separate skill with a new ID.
+
+### Common flags
+
+| Flag | Action |
+| --- | --- |
+| `--project <path>` | Use another project |
+| `--project auto` | Use the nearest Git root |
+| `--global` | Use the personal scope |
+| `--dry-run` | Show changes without writing them |
+| `--yes`, `-y` | Skip confirmation after a preview |
+| `--json` | Print JSON when supported |
+
+Library commands use the global scope by default. `add`, `remove`, and `sync` use the current Git project by default.
+
+## TUI
+
+Run `skmr` or `skmr tui`.
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓`, `k` / `j` | Select a group or skill |
-| `Enter`, `→`, `←` | Toggle a group, expand/enter it, return to its header/collapse it |
-| `/`, `Enter`, `Esc` | Start search, finish editing, clear search |
-| `Tab` | Switch global/project scope (uses nearest Git root if no project was supplied) |
-| `f`, `1`–`4` | Cycle or directly select All skills, Library, Other folders, or project-only Parent scopes |
-| `x` | Open Actions for the selected skill |
-| `A` | Open the multi-select Add skills flow |
-| `↑` / `↓`, `k` / `j`, `Enter` | Choose and run an action while Actions is open |
-| `!` | Open the deduplicated problems list and recovery guidance |
-| `y`, `n` / `Esc` | Apply or cancel a change preview |
-| `PgUp` / `PgDn` | Scroll details, instructions, help, problems, or a change preview |
-| `R`, `?`, `q` | Refresh, toggle help, quit |
+| `↑` / `↓` or `k` / `j` | Move through the list |
+| `Enter`, `→`, `←` | Open or close a display group |
+| `/` | Search |
+| `Tab` | Switch global and project scope |
+| `x` | Open skill actions |
+| `A` | Add several skills to the library |
+| `!` | Show problems |
+| `R` | Refresh |
+| `?` | Show help |
+| `q` | Quit |
 
-All skill operations start in **Actions**. Inside the menu, use `i` to read instructions, `v` to compare different copies, `o` to open a parent skill’s owning scope, `Space` (or the applicable `e`/`d`) to enable or disable, and `a`, `c`, `m`, `p`, or `r` to add, keep a copy, move, copy, or remove. Only available actions are shown, and these shortcuts work only while Actions is open. Press `Esc` to return.
+Display groups in the TUI come from folders and plugins. They are different from install groups made with `skmr group create`.
 
-The **Add skills** flow is the batch exception. Press `Space` to select, `a` to select every safe skill, `n` to clear, and `←` or `→` to browse duplicate-name copies. Press `Enter` to review one combined filesystem plan. The first-run version can be skipped with `Esc`; skmr remembers the choice, and `A` reopens the flow later.
+## Safety and recovery
 
-Plugin bundles and nested skill folders appear as collapsed groups with skill counts. Skills directly inside a discovery root remain standalone. Select a group to inspect its source, scope, version, and member states; select an individual skill to manage it. Group headers never apply changes to their members.
+`skmr` does not overwrite files it does not own. Skill and project commands show their changes and support `--dry-run`.
 
-Below 76 columns, the TUI shows one pane at a time. The skill list opens first; press `Enter` for details, `x` then `i` for instructions, and `Esc` to return. At the 30×10 minimum, secondary guidance is hidden so the Actions, help, and quit controls remain available.
-
-For different copies or copies with different agent config, open Actions with `x`, then press `v` to compare complete package contents side by side. The selected copy stays on the left and the comparison copy appears on the right, with aligned line numbers and filename-aware syntax highlighting. Added lines use `+`, removed lines use `-`, and file and hunk headers are highlighted. Use `←` and `→` to pan long lines, or `[` and `]` to switch comparison copies when more than two locations exist.
-
-Search matches group labels as well as skill names, descriptions, and paths, and reveals matching children automatically. Views hide empty groups and show matching/total counts. Clear search to restore your expansion choices, which are retained per scope for the current session. Library skills retain their original folder grouping after adoption or disabling. Separate plugin versions and discovery locations remain separate groups. CLI text inventories remain flat; JSON results include optional `group` metadata.
-
-Mouse-capable terminals can click group headers to select and expand/collapse them, or click skills, views, scope, search, and footer actions. The scroll wheel moves through the skill list or the active detail/review pane.
-
-## Files and ownership
-
-Global storage:
-
-```text
-$XDG_DATA_HOME/skmr/              # default: ~/.local/share/skmr
-  manifest.json                  # versioned ownership records
-  library/<id>/<name>/            # complete original skill folder
-  library/<id>/.skmr-duplicates/  # preserved additional copies
-  .lock                          # advisory process lock
-  journal.json                   # present only during an unfinished operation
-  batch.json                     # present only during an unfinished batch adoption
-  transfer.json                  # present in both scopes during an unfinished transfer
-  setup.json                     # first-run migration completion or dismissal
-```
-
-Project storage uses `<project>/.skmr/` with the same operational layout except for the global-only setup marker. Project manifests and discovery symlinks use relative paths, so a completed installation can move with its repository. To share a project installation, commit the library, manifest, and discovery symlinks together; keep `.skmr/.lock`, `.skmr/journal.json`, `.skmr/transfer.json`, `.skmr/.skmr-write-*`, and `.skmr/.skmr-copy-*` out of Git. Do not move a project while an operation is pending recovery.
-
-Adoption moves the selected folder into the library and exposes it through one managed `.agents/skills/<name>` link. When duplicates exist, the selected copy is kept and other writable copies move into tracked backup storage. Move transfers ownership and preserves the ID and enabled state. Copy creates an independent package with a new ID and the same enabled state. Disable removes the discovery link. Stopping management after a transfer places the skill in the destination scope's `.agents/skills` directory; older records still restore to their original locations. Restoration retains all edits made while a skill was managed. Unrecorded links and files are never deleted or overwritten.
-
-skmr uses filesystem rename to preserve contents, permissions, and internal relative symlinks. Source and library must be on the same filesystem; choose `XDG_DATA_HOME` accordingly. Relative links escaping the package and absolute links back into the package must be corrected before adoption. Existing symlinked skills, built-in `.system` skills, plugin-cache skills, and inherited entries are view only. Symlinked parent directories are rejected for writes.
-
-### Recovery
-
-If a write is interrupted, skmr keeps a single-operation, batch, or transfer journal and blocks further management changes in that scope. Reads and diagnostics remain available.
+If a write stops halfway through, fix the reported problem and continue it:
 
 ```sh
 skmr doctor
-# Resolve the reported permission problem or conflicting path, preserving your files.
 skmr doctor --recover
-# Or: skmr doctor --recover --project ./my-project
 ```
 
-Recovery resumes the journaled operation; it does not roll it back. It verifies folder identity and symlink targets before acting, and can be repeated safely. Do not delete the journal to bypass a problem. A replaced link is a conflict, not permission to delete the new file. `doctor` reports occupied managed paths even when the skill is disabled. Restore recovery verifies the library folder before removing discovery links.
+For another project:
 
-## Discovery and compatibility
+```sh
+skmr doctor --recover --project ./my-project
+```
 
-| Location | Agents associated with discovery |
+Project installs are journaled. Recovery finishes the whole request, including every skill in a group.
+
+Skills with the same name are shown as copies. Choose the copy to keep with `skmr adopt <path> --dry-run`, then run it again with `--yes`. Other writable copies are kept as backups.
+
+## Files
+
+The personal library is stored at `$XDG_DATA_HOME/skmr`, or `~/.local/share/skmr` by default:
+
+```text
+skmr/
+  manifest.json      # managed skills
+  groups.json        # install groups
+  library/           # skill files and backups
+```
+
+Project state is stored in the project:
+
+```text
+.skmr/
+  manifest.json      # skills owned by this project
+  packages.json      # skills and groups requested by this project
+.agents/skills/      # agent discovery links
+```
+
+Project package links point to the personal library. On another computer, add the needed skills to its library and run `skmr sync`.
+
+## Supported skill folders
+
+| Location | Agent |
 | --- | --- |
 | `~/.agents/skills`, `<project>/.agents/skills` | Codex, OpenCode, Pi |
-| `~/.codex/skills`, `<project>/.codex/skills` | Codex legacy inventory |
+| `~/.codex/skills`, `<project>/.codex/skills` | Codex |
 | `$XDG_CONFIG_HOME/opencode/skills`, `<project>/.opencode/skills` | OpenCode |
 | `~/.pi/agent/skills`, `<project>/.pi/skills` | Pi |
-| `~/.claude/skills`, `<project>/.claude/skills` | OpenCode compatibility inventory |
-| `~/.codex/plugins/cache` | Codex plugin inventory, view only |
+| `~/.claude/skills`, `<project>/.claude/skills` | OpenCode compatibility |
 
-`XDG_CONFIG_HOME` defaults to `~/.config`. Skill directories are scanned recursively, stopping at a `SKILL.md` package; `.git` and `node_modules` are skipped. Symlink cycles, unreadable directories, malformed frontmatter, and duplicate names are reported. Duplicate packages are compared by content, paths, entry types, and symlink targets, with differences limited to `agents/openai.yaml` classified separately. Full-package verification still includes every file. Permissions are ignored. When copies differ, adopt the copy you want to keep.
+Built-in and plugin-cache skills are view only. Remote installs, Windows, Pi flat Markdown skills, custom discovery folders, and separate per-agent switches are not supported yet.
 
-“Enabled” means skmr's discovery links are enabled. It does not override agent permissions, project trust, native disabled-skill settings, or an already-running session. Agent badges describe directory-based visibility, not a live query of each agent. Shared enablement applies to all three agents; another unmanaged or inherited copy may remain discoverable after disabling a managed copy. Restart or reload an agent if changes do not appear.
-
-Custom discovery settings, administrator-installed skills, Pi flat Markdown skills, remote installation, independent per-agent toggles, and Windows support are outside v1. SKILL.md previews are limited to 1 MiB. No agent executable is required.
-
-Directory behavior is based on the official [Codex skill documentation](https://learn.chatgpt.com/docs/build-skills), [OpenCode skills documentation](https://opencode.ai/docs/skills/), and [Pi skill documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md).
+Directory behavior follows the [Codex skill documentation](https://learn.chatgpt.com/docs/build-skills), [OpenCode skill documentation](https://opencode.ai/docs/skills/), and [Pi skill documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md).
 
 ## Development
 
 ```sh
-make test       # race-enabled tests using isolated temporary homes
+go build -o bin/skmr ./cmd/skmr
+make test
 make vet
-make build
 make release-check
 make snapshot
-make cross      # Darwin/Linux, amd64/arm64 binaries under dist/
+make cross
 ```
-
-`release-check` accepts GoReleaser's expected deprecation warning for the selected Homebrew formula publisher while still failing on an invalid configuration.
-
-Both interfaces call `internal/manager`. Agent roots live in `internal/agents`, parsing/discovery in `internal/skills`, and terminal sanitization in `internal/terminal`. There is no database, daemon, network client, or agent-specific config rewriting.

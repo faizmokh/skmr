@@ -33,7 +33,7 @@ func New(build BuildInfo) *cobra.Command {
 	root.SetOut(os.Stdout)
 	root.SetErr(os.Stderr)
 	root.SetIn(os.Stdin)
-	root.PersistentFlags().BoolVar(&global, "global", false, "Manage personal skills (default)")
+	root.PersistentFlags().BoolVar(&global, "global", false, "Manage the personal skill scope explicitly")
 	root.PersistentFlags().StringVar(&project, "project", "", "Manage project skills; use 'auto' for the nearest Git root")
 	root.MarkFlagsMutuallyExclusive("global", "project")
 	service := func() (*manager.Service, error) { return manager.Environment(project) }
@@ -371,6 +371,108 @@ func New(build BuildInfo) *cobra.Command {
 		}
 		root.AddCommand(cmd)
 	}
+	packageService := func() (*manager.Service, error) {
+		if global {
+			return nil, fmt.Errorf("project packages cannot be managed with --global")
+		}
+		target := project
+		if target == "" {
+			target = "auto"
+		}
+		return manager.Environment(target)
+	}
+	for _, action := range []string{"add", "remove", "sync"} {
+		var dry bool
+		use := action + " <skill|@group>..."
+		short := map[string]string{
+			"add":    "Add central-library skills to the current project",
+			"remove": "Remove direct skill or group requests from the current project",
+			"sync":   "Reconcile current-project skills with its package manifest",
+		}[action]
+		args := cobra.MinimumNArgs(1)
+		if action == "sync" {
+			use = "sync"
+			args = cobra.NoArgs
+		}
+		cmd := &cobra.Command{Use: use, Short: short, Args: args}
+		if action == "add" {
+			cmd.Aliases = []string{"install"}
+		}
+		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview changes without writing files")
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			s, err := packageService()
+			if err != nil {
+				return err
+			}
+			plan, err := s.PreviewPackages(action, args)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+			if dry {
+				return nil
+			}
+			if err = s.ApplyPackages(plan); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Done: project now has %d skills from %d requests.\n", len(plan.After.Skills), len(plan.After.Requests))
+			return nil
+		}
+		root.AddCommand(cmd)
+	}
+	{
+		group := &cobra.Command{Use: "group", Short: "Manage reusable central-library skill groups"}
+		group.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+			if project != "" {
+				return fmt.Errorf("groups are global definitions; omit --project")
+			}
+			return nil
+		}
+		var asJSON bool
+		list := &cobra.Command{Use: "list", Short: "List installable groups", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := manager.Environment("")
+			if err != nil {
+				return err
+			}
+			groups, err := s.Groups()
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return writeJSON(cmd.OutOrStdout(), groups)
+			}
+			for _, item := range groups {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", oneLine(item.Name), strings.Join(item.Members, ", "))
+			}
+			return nil
+		}}
+		list.Flags().BoolVar(&asJSON, "json", false, "Write structured JSON")
+		group.AddCommand(list)
+		group.AddCommand(&cobra.Command{Use: "create <name> <skill|@group>...", Short: "Create an installable skill group", Args: cobra.MinimumNArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := manager.Environment("")
+			if err != nil {
+				return err
+			}
+			created, err := s.CreateGroup(args[0], args[1:])
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Created group @%s with %d members.\n", oneLine(created.Name), len(created.Members))
+			return nil
+		}})
+		group.AddCommand(&cobra.Command{Use: "delete <name>", Short: "Delete an installable skill group", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := manager.Environment("")
+			if err != nil {
+				return err
+			}
+			if err = s.DeleteGroup(strings.TrimPrefix(args[0], "@")); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Deleted group @%s.\n", oneLine(strings.TrimPrefix(args[0], "@")))
+			return nil
+		}})
+		root.AddCommand(group)
+	}
 	return root
 }
 
@@ -397,17 +499,21 @@ func writeJSON(w io.Writer, v any) error {
 }
 func status(s skills.Skill) string {
 	state := "available"
-	if s.Managed {
+	if s.Installed {
+		state = "installed"
+	} else if s.Managed {
 		if s.Enabled {
 			state = "enabled"
 		} else {
 			state = "disabled"
 		}
 	}
-	if s.Inherited {
-		state += " / inherited"
-	} else if s.ReadOnly {
-		state += " / view only"
+	if !s.Installed {
+		if s.Inherited {
+			state += " / inherited"
+		} else if s.ReadOnly {
+			state += " / view only"
+		}
 	}
 	if s.ConflictKind != "" {
 		state += " / " + skills.ConflictLabel(s.ConflictKind)
