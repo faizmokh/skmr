@@ -111,6 +111,58 @@ func TestListShowAndDryRun(t *testing.T) {
 	}
 }
 
+func TestRemoteImportCommandSelection(t *testing.T) {
+	setup(t)
+	bin := t.TempDir()
+	script := `#!/bin/sh
+case "$*" in
+  *" --list"*) printf '◇  Available Skills\n│    alpha\n│      First\n│    beta\n│      Second\n└  Use --skill <name> to install\n'; exit 0 ;;
+esac
+name=''
+previous=''
+for arg in "$@"; do
+  if [ "$previous" = '--skill' ]; then name="$arg"; fi
+  previous="$arg"
+done
+path="$(pwd -P)/.agents/skills/$name"
+mkdir -p "$path"
+printf '%s\n' '---' "name: $name" 'description: Example' '---' 'body' > "$path/SKILL.md"
+printf 'progress\n[\n{"name":"%s","status":"installed","path":"%s"}\n]\n' "$name" "$path"
+`
+	if err := os.WriteFile(filepath.Join(bin, "npx"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	url := "https://github.com/example/skills"
+	if _, err := run("import", url); err == nil || !strings.Contains(err.Error(), "--skill") {
+		t.Fatalf("multiple skills did not require selection: %v", err)
+	}
+	out, err := run("import", url, "--skill", "alpha", "--dry-run")
+	if err != nil || !strings.Contains(out, "Store disabled") {
+		t.Fatalf("import preview: %q, %v", out, err)
+	}
+	if _, err = run("import", url, "--skill", "alpha", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("list", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result skills.Result
+	if err = json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, skill := range result.Skills {
+		if skill.Name == "alpha" {
+			found = skill.Remote && skill.Managed && !skill.Enabled
+		}
+	}
+	if !found {
+		t.Fatalf("imported skill not disabled in list: %s", out)
+	}
+}
+
 func TestMoveAndCopyCommands(t *testing.T) {
 	path := setup(t)
 	if _, err := run("adopt", path, "--yes"); err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -36,6 +37,7 @@ func New(build BuildInfo) *cobra.Command {
 	root.PersistentFlags().BoolVar(&global, "global", false, "Manage the personal skill scope explicitly")
 	root.PersistentFlags().StringVar(&project, "project", "", "Manage project skills; use 'auto' for the nearest Git root")
 	root.MarkFlagsMutuallyExclusive("global", "project")
+	var importCommand *cobra.Command
 	service := func() (*manager.Service, error) { return manager.Environment(project) }
 	launch := func(cmd *cobra.Command, args []string) error {
 		s, err := service()
@@ -66,6 +68,193 @@ func New(build BuildInfo) *cobra.Command {
 			return err
 		},
 	})
+	{
+		var selected []string
+		var dry, yes bool
+		cmd := &cobra.Command{Use: "import [url]", Short: "Import GitHub or skills.sh skills into the personal library", Args: cobra.MaximumNArgs(1)}
+		importCommand = cmd
+		cmd.Flags().StringSliceVar(&selected, "skill", nil, "Select a skill by name (repeatable)")
+		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview without changing the library")
+		cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the preview without prompting")
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			if project != "" {
+				return fmt.Errorf("imports use the personal library; omit --project")
+			}
+			if len(args) == 0 {
+				if !isTerminal(cmd.InOrStdin()) {
+					return fmt.Errorf("provide a GitHub or skills.sh URL")
+				}
+				fmt.Fprint(cmd.OutOrStdout(), "GitHub or skills.sh URL: ")
+				line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if e != nil {
+					return e
+				}
+				args = []string{strings.TrimSpace(line)}
+			}
+			s, err := manager.Environment("")
+			if err != nil {
+				return err
+			}
+			candidates, err := s.DiscoverRemote(args[0])
+			if err != nil {
+				return err
+			}
+			choices := append([]string{}, selected...)
+			if len(choices) == 0 {
+				if len(candidates) == 1 {
+					choices = []string{candidates[0].Name}
+				} else {
+					if !isTerminal(cmd.InOrStdin()) {
+						return fmt.Errorf("source contains %d skills; pass --skill <name> to select", len(candidates))
+					}
+					fmt.Fprintln(cmd.OutOrStdout(), "Available skills:")
+					for i, candidate := range candidates {
+						fmt.Fprintf(cmd.OutOrStdout(), "  %d. %s\n", i+1, terminal.Safe(candidate.Name))
+					}
+					fmt.Fprint(cmd.OutOrStdout(), "Select numbers (comma separated): ")
+					line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+					if e != nil {
+						return e
+					}
+					for _, part := range strings.Split(strings.TrimSpace(line), ",") {
+						n, e := strconv.Atoi(strings.TrimSpace(part))
+						if e != nil || n < 1 || n > len(candidates) {
+							return fmt.Errorf("invalid skill selection %q", part)
+						}
+						choices = append(choices, candidates[n-1].Name)
+					}
+				}
+			}
+			allowed := map[string]bool{}
+			for _, candidate := range candidates {
+				allowed[candidate.Name] = true
+			}
+			for _, choice := range choices {
+				if !allowed[choice] {
+					return fmt.Errorf("skill %q is not available from this source", choice)
+				}
+			}
+			plan, err := s.PrepareImport(args[0], choices)
+			if err != nil {
+				return err
+			}
+			defer plan.Cleanup()
+			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+			if dry {
+				return nil
+			}
+			if !yes {
+				if !isTerminal(cmd.InOrStdin()) {
+					return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
+				}
+				fmt.Fprint(cmd.OutOrStdout(), "Import these skills? [y/N] ")
+				line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if e != nil {
+					return e
+				}
+				if response := strings.ToLower(strings.TrimSpace(line)); response != "y" && response != "yes" {
+					fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
+					return nil
+				}
+			}
+			if err = s.ApplyRemote(plan); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Done: imported %d disabled skills.\n", len(plan.Entries))
+			return nil
+		}
+		root.AddCommand(cmd)
+	}
+	{
+		cmd := &cobra.Command{Use: "search [query]", Short: "Search skills.sh for skills to import", Args: cobra.ArbitraryArgs}
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				if !isTerminal(cmd.InOrStdin()) {
+					return fmt.Errorf("provide a search query")
+				}
+				fmt.Fprint(cmd.OutOrStdout(), "Search skills.sh: ")
+				line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if e != nil {
+					return e
+				}
+				args = []string{strings.TrimSpace(line)}
+			}
+			results, err := manager.SearchRemote(strings.Join(args, " "))
+			if err != nil {
+				return err
+			}
+			if len(results) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No skills found.")
+				return nil
+			}
+			for i, result := range results {
+				fmt.Fprintf(cmd.OutOrStdout(), "%d. %s\t%s\n", i+1, terminal.Safe(result.Name), terminal.Safe(result.URL))
+			}
+			if !isTerminal(cmd.InOrStdin()) {
+				return nil
+			}
+			fmt.Fprint(cmd.OutOrStdout(), "Open result number for import (Enter to skip): ")
+			line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+			if e != nil {
+				return e
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				return nil
+			}
+			n, e := strconv.Atoi(line)
+			if e != nil || n < 1 || n > len(results) {
+				return fmt.Errorf("invalid result number")
+			}
+			return importCommand.RunE(importCommand, []string{results[n-1].URL})
+		}
+		root.AddCommand(cmd)
+	}
+	{
+		var dry, yes, replace bool
+		cmd := &cobra.Command{Use: "update <id>", Short: "Refresh an imported skill from its source", Args: cobra.ExactArgs(1)}
+		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview without changing the library")
+		cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the preview without prompting")
+		cmd.Flags().BoolVar(&replace, "replace", false, "Replace locally edited skill content")
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			if project != "" {
+				return fmt.Errorf("updates use the personal library; omit --project")
+			}
+			s, err := manager.Environment("")
+			if err != nil {
+				return err
+			}
+			plan, err := s.PrepareUpdate(args[0], replace)
+			if err != nil {
+				return err
+			}
+			defer plan.Cleanup()
+			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+			if dry || len(plan.Entries) == 0 {
+				return nil
+			}
+			if !yes {
+				if !isTerminal(cmd.InOrStdin()) {
+					return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
+				}
+				fmt.Fprint(cmd.OutOrStdout(), "Apply this update? [y/N] ")
+				line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if e != nil {
+					return e
+				}
+				if response := strings.ToLower(strings.TrimSpace(line)); response != "y" && response != "yes" {
+					fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
+					return nil
+				}
+			}
+			if err = s.ApplyRemote(plan); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Done: skill updated.")
+			return nil
+		}
+		root.AddCommand(cmd)
+	}
 	for _, kind := range []string{"list", "show", "doctor"} {
 		var asJSON, recover bool
 		cmd := &cobra.Command{Use: kind, Short: map[string]string{"list": "List available and managed skills", "show": "Show a skill and its instructions", "doctor": "Check links, copies, and interrupted operations"}[kind], Args: cobra.NoArgs}
@@ -130,6 +319,9 @@ func New(build BuildInfo) *cobra.Command {
 					}{item, string(content)})
 				}
 				fmt.Fprintf(out, "%s · %s · %s\n%s\nAgents: %s\n", oneLine(item.Name), displayScope(item), status(item), terminal.Safe(item.Path), strings.Join(item.Agents, ", "))
+				if item.Remote {
+					fmt.Fprintln(out, "Source:", terminal.Safe(item.SourceURL))
+				}
 				for _, issue := range item.Issues {
 					fmt.Fprintln(out, "Warning:", terminal.Safe(issue))
 				}

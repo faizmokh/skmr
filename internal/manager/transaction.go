@@ -176,6 +176,9 @@ func (s *Service) preview(action, arg string) (Plan, error) {
 		}
 	}
 	if action == "restore" {
+		if r.Remote != nil {
+			return p, nil
+		}
 		for _, origin := range r.Origins {
 			source := origin.Backup
 			if origin.Canonical {
@@ -226,6 +229,9 @@ func (s *Service) Apply(plan Plan) error {
 }
 
 func (s *Service) Recover() error {
+	if !absent(filepath.Join(s.Store, "remote-journal.json")) {
+		return s.recoverRemote()
+	}
 	if !absent(filepath.Join(s.Store, "transfer.json")) {
 		return s.recoverTransfer()
 	}
@@ -445,6 +451,9 @@ func (s *Service) execute(p Plan) error {
 			}
 		}
 		if p.Action == "restore" {
+			if r.Remote != nil {
+				return os.RemoveAll(r.Library)
+			}
 			return executeMoves(p.Moves)
 		}
 	default:

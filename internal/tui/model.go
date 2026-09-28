@@ -3,6 +3,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -51,6 +53,7 @@ type pendingTransfer struct {
 	destination *manager.Service
 }
 type contentMsg struct{ id, content string }
+type remoteDoneMsg struct{ err error }
 
 type Model struct {
 	service         *manager.Service
@@ -82,6 +85,7 @@ type Model struct {
 	diffLoading     bool
 	inventory       inventoryPhase
 	busy            bool
+	remoteMenu      bool
 	notice          notice
 }
 
@@ -183,6 +187,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if item, ok := m.selected(); ok && item.ID == msg.id {
 			m.content = msg.content
 		}
+	case remoteDoneMsg:
+		m.remoteMenu = false
+		if msg.err != nil {
+			m.setNotice(noticeError, "Remote command failed: "+sanitizeNotice(msg.err))
+		} else {
+			m.setNotice(noticeSuccess, "Remote command finished. Skills may need a reload.")
+		}
+		m.busy = true
+		return m, m.load()
 	case diffMsg:
 		source, target, ok := m.selectedDiffTarget()
 		if m.pane != paneDiff || !ok || source.ID != msg.sourceID || target.ID != msg.targetID {
@@ -309,6 +322,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				view, _ := viewForShortcut(key)
 				m.selectView(view)
 				return m, nil
+			}
+			return m, nil
+		}
+		if m.remoteMenu {
+			switch key {
+			case "esc", "q":
+				m.remoteMenu = false
+				return m, nil
+			case "p":
+				m.remoteMenu = false
+				return m.runRemoteCommand("import")
+			case "s":
+				m.remoteMenu = false
+				return m.runRemoteCommand("search")
 			}
 			return m, nil
 		}
@@ -659,6 +686,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.setNotice(noticeInfo, "Choose the skills you want skmr to manage.")
 			return m, nil
+		case "I":
+			m.remoteMenu = true
+			return m, nil
 		case "x":
 			if item, ok := m.selected(); ok && len(actionsForSkill(item)) > 0 {
 				m.actionCursor = 0
@@ -680,6 +710,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // runSkillAction dispatches an available action selected in the Actions pane.
 func (m Model) runSkillAction(key string) (tea.Model, tea.Cmd) {
 	switch key {
+	case "u":
+		item, ok := m.selected()
+		if !ok || !item.Remote || item.Inherited {
+			return m, nil
+		}
+		return m.runRemoteCommand("update", item.ID)
+	case "U":
+		item, ok := m.selected()
+		if !ok || !item.Remote || item.Inherited {
+			return m, nil
+		}
+		return m.runRemoteCommand("update", item.ID, "--replace")
 	case "i":
 		if _, ok := m.selected(); ok {
 			m.openPane(paneInstructions)
@@ -775,6 +817,17 @@ func (m Model) runSkillAction(key string) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m Model) runRemoteCommand(args ...string) (tea.Model, tea.Cmd) {
+	path, err := os.Executable()
+	if err != nil {
+		m.setNotice(noticeError, sanitizeNotice(err))
+		return m, nil
+	}
+	command := exec.Command(path, args...)
+	command.Env = os.Environ()
+	return m, tea.ExecProcess(command, func(err error) tea.Msg { return remoteDoneMsg{err: err} })
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {

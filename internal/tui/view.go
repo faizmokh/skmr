@@ -68,6 +68,8 @@ func (m Model) View() string {
 	var body string
 	if m.pending != nil || m.pendingTransfer != nil {
 		body = m.reviewView(w, bodyHeight)
+	} else if m.remoteMenu {
+		body = frame("Import internet skills", fillWrapped([]string{"", accentStyle.Render("p  Paste GitHub or skills.sh URL"), "", accentStyle.Render("s  Search skills.sh"), "", mutedStyle.Render("Esc  Return to library")}, w-2), w, bodyHeight, true)
 	} else if m.transferAction != "" {
 		body = m.transferView(w, bodyHeight)
 	} else if m.pane == paneInstructions {
@@ -344,7 +346,11 @@ func (m Model) detailContent(width int) []string {
 	if s.Group != nil {
 		lines = append(lines, field("Group", terminal.Safe(s.Group.Name), width)...)
 	}
-	lines = append(lines, field("Source", terminal.Safe(s.Path), width)...)
+	source := s.Path
+	if s.Remote {
+		source = s.SourceURL
+	}
+	lines = append(lines, field("Source", terminal.Safe(source), width)...)
 	lines = append(lines, field("Scope", terminal.Safe(s.Scope), width)...)
 	owner := "outside library"
 	if s.Managed || s.Inherited {
@@ -398,6 +404,7 @@ func (m Model) helpContent(width int) []string {
 		accentStyle.Render("Browse"),
 		"  /  search       f or 1–4  change view",
 		"  Tab  scope      R  refresh",
+		"  I  import from internet",
 		"  !  problems",
 		"",
 		accentStyle.Render("Act"),
@@ -631,6 +638,9 @@ func (m Model) shortcuts() []shortcut {
 	if m.pending != nil || m.pendingTransfer != nil {
 		return []shortcut{{"y", "apply", "y", true}, {"n", "cancel", "n", true}, {"PgUp/Dn", "review", "", false}, {"q", "quit", "q", true}}
 	}
+	if m.remoteMenu {
+		return []shortcut{{"p", "paste URL", "p", true}, {"s", "search", "s", true}, {"Esc", "back", "esc", true}}
+	}
 	if m.transferAction != "" {
 		return []shortcut{{"type", "destination", "", false}, {"Enter", "review", "enter", true}, {"Esc", "cancel", "esc", true}, {"⌫", "delete", "backspace", false}}
 	}
@@ -653,7 +663,7 @@ func (m Model) shortcuts() []shortcut {
 	case paneActions:
 		return []shortcut{{"↑↓", "choose", "", false}, {"Enter", "select", "enter", true}, {"Esc", "back", "esc", true}, {"q", "quit", "q", true}}
 	}
-	out := []shortcut{{"↑↓", "select", "", false}, {"/", "search", "/", false}, {"A", "add skills", "A", false}}
+	out := []shortcut{{"↑↓", "select", "", false}, {"/", "search", "/", false}, {"A", "add skills", "A", false}, {"I", "import", "I", false}}
 	if m.pane == paneDetails && m.compact() {
 		out = append(out, shortcut{"Esc", "back", "esc", true})
 	}

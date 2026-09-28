@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,13 +22,22 @@ type Origin struct {
 }
 
 type Record struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Original string   `json:"original"`
-	Library  string   `json:"library"`
-	Links    []string `json:"links"`
-	Enabled  bool     `json:"enabled"`
-	Origins  []Origin `json:"origins,omitempty"`
+	ID       string        `json:"id"`
+	Name     string        `json:"name"`
+	Original string        `json:"original"`
+	Library  string        `json:"library"`
+	Links    []string      `json:"links"`
+	Enabled  bool          `json:"enabled"`
+	Origins  []Origin      `json:"origins,omitempty"`
+	Remote   *RemoteSource `json:"remote,omitempty"`
+}
+
+// RemoteSource identifies content imported from an internet source.
+type RemoteSource struct {
+	URL      string `json:"url"`
+	Skill    string `json:"skill"`
+	Digest   string `json:"digest"`
+	Revision string `json:"revision,omitempty"`
 }
 type Manifest struct {
 	Version int      `json:"version"`
@@ -109,6 +119,14 @@ func (s *Service) validate(r Record) error {
 	}
 	if r.Library != filepath.Join(s.Store, "library", r.ID, r.Name) {
 		return fmt.Errorf("invalid library path for %s", r.ID)
+	}
+	if r.Remote != nil {
+		_, _, sourceErr := normalizeRemote(r.Remote.URL)
+		_, digestErr := hex.DecodeString(r.Remote.Digest)
+		if s.Config.Project != "" || sourceErr != nil || r.Remote.Skill != r.Name || len(r.Remote.Digest) != 64 || digestErr != nil || r.Original != "" || len(r.Origins) != 0 || len(r.Links) != 1 || r.Links[0] != filepath.Join(s.Shared(), r.Name) {
+			return fmt.Errorf("invalid remote record for %s", r.ID)
+		}
+		return nil
 	}
 	allowed := false
 	for _, root := range s.Roots {

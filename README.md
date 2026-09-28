@@ -4,6 +4,8 @@
 
 It stores skills in one library. You can make a skill global, install it in one project, or install a group of related skills. It works offline and never runs skill instructions or scripts.
 
+Internet import and search need Node.js and a network connection. Use skmr commands for selection, review, and library management; skmr stages downloads in a temporary directory.
+
 ## Install
 
 With Homebrew:
@@ -54,6 +56,32 @@ skmr adopt --all --yes
 ```
 
 An adopted skill stays global until you disable it.
+
+### Import from the internet
+
+Paste a GitHub repository or skill-folder URL, a skills.sh skill page, or a skills.sh pack URL:
+
+```sh
+skmr import https://github.com/vercel-labs/skills --dry-run
+skmr import https://skills.sh/vercel-labs/skills/find-skills
+skmr import https://skills.sh/p/your-pack-id
+```
+
+If the source contains several skills, choose from the numbered list, or pass one or more `--skill <name>` flags. Scripts must select skills explicitly and pass `--yes` after reviewing a dry run. Imported skills enter the personal library disabled; use `skmr enable <name>` for global discovery or `skmr add <name>` in a project.
+
+Search skills.sh and choose a result to import:
+
+```sh
+skmr search "react testing"
+```
+
+Refresh an imported skill manually. The preview shows changed files and protects local edits:
+
+```sh
+skmr update find-skills --dry-run
+skmr update find-skills
+skmr update find-skills --replace  # explicitly overwrite local edits
+```
 
 ### Keep a skill out of the global scope
 
@@ -146,6 +174,7 @@ If two requests need the same skill, `skmr` installs it once. Removing one reque
 | `skmr list --json` | Print the list as JSON |
 | `skmr show <name-or-id>` | Show one skill and its instructions |
 | `skmr doctor` | Check skills, links, and unfinished work |
+| `skmr search <query>` | Search skills.sh and choose a result to import |
 
 ### Manage the library
 
@@ -156,6 +185,8 @@ If two requests need the same skill, `skmr` installs it once. Removing one reque
 | `skmr enable <name-or-id>` | Make a library skill available |
 | `skmr disable <name-or-id>` | Hide a skill but keep it stored |
 | `skmr restore <name-or-id>` | Put a skill back and stop managing it |
+| `skmr import <url>` | Import internet skills into the library, disabled |
+| `skmr update <name-or-id>` | Review and apply a remote skill update |
 
 ### Manage project skills
 
@@ -204,6 +235,7 @@ Run `skmr` or `skmr tui`.
 | `Tab` | Switch global and project scope |
 | `x` | Open skill actions |
 | `A` | Add several skills to the library |
+| `I` | Import from a URL or search skills.sh |
 | `!` | Show problems |
 | `R` | Refresh |
 | `?` | Show help |
@@ -264,7 +296,7 @@ Project package links point to the personal library. On another computer, add th
 | `~/.pi/agent/skills`, `<project>/.pi/skills` | Pi |
 | `~/.claude/skills`, `<project>/.claude/skills` | OpenCode compatibility |
 
-Built-in and plugin-cache skills are view only. Remote installs, Windows, Pi flat Markdown skills, custom discovery folders, and separate per-agent switches are not supported yet.
+Built-in and plugin-cache skills are view only. Windows, Pi flat Markdown skills, custom discovery folders, and separate per-agent switches are not supported yet.
 
 Directory behavior follows the [Codex skill documentation](https://learn.chatgpt.com/docs/build-skills), [OpenCode skill documentation](https://opencode.ai/docs/skills/), and [Pi skill documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md).
 

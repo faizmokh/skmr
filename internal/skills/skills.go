@@ -28,6 +28,8 @@ type Skill struct {
 	Agents        []string `json:"agents"`
 	Managed       bool     `json:"managed"`
 	Installed     bool     `json:"installed,omitempty"`
+	Remote        bool     `json:"remote,omitempty"`
+	SourceURL     string   `json:"source_url,omitempty"`
 	Enabled       bool     `json:"enabled"`
 	Inherited     bool     `json:"inherited"`
 	ReadOnly      bool     `json:"read_only"`

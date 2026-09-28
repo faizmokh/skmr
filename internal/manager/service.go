@@ -68,11 +68,17 @@ func (s *Service) List() (skills.Result, error) {
 	for _, set := range sets {
 		for _, r := range set.m.Records {
 			item := skills.Parse(r.Library)
-			item.Group = skills.GroupFor(r.Original, s.Roots)
+			if r.Remote == nil {
+				item.Group = skills.GroupFor(r.Original, s.Roots)
+			}
 			item.ID = r.ID
 			item.Name = r.Name
 			item.Managed = true
 			item.Enabled = r.Enabled
+			if r.Remote != nil {
+				item.Remote = true
+				item.SourceURL = r.Remote.URL
+			}
 			item.Scope = set.scope
 			item.OwnerProject = set.project
 			item.Inherited = set.inherited

@@ -84,6 +84,18 @@ func TestNavigationSearchAndPreview(t *testing.T) {
 		t.Fatal("library view failed")
 	}
 }
+
+func TestRemoteImportMenu(t *testing.T) {
+	m := model(t)
+	m, _ = key(m, "I")
+	if !m.remoteMenu || !strings.Contains(m.View(), "Paste GitHub or skills.sh URL") {
+		t.Fatal("import menu did not open")
+	}
+	m, _ = key(m, "esc")
+	if m.remoteMenu {
+		t.Fatal("import menu did not close")
+	}
+}
 func TestConfirmCancelAndApply(t *testing.T) {
 	m := model(t)
 	m, cmd := actionKey(m, "a")

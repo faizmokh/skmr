@@ -23,16 +23,22 @@ func actionsForSkill(skill skills.Skill) []skillAction {
 		return actions
 	}
 	if skill.Managed {
+		if skill.Remote {
+			actions = append(actions, skillAction{key: "u", label: "Update from source", event: "u"})
+			actions = append(actions, skillAction{key: "U", label: "Replace local edits from source", event: "U"})
+		}
 		label, event := "Enable", "e"
 		if skill.Enabled {
 			label, event = "Disable", "d"
 		}
 		actions = append(actions, skillAction{key: "Space", label: label, event: event})
-		actions = append(actions,
-			skillAction{key: "m", label: "Move to another scope", event: "m"},
-			skillAction{key: "p", label: "Copy to another scope", event: "p"},
-			skillAction{key: "r", label: "Remove from library", event: "r"},
-		)
+		if !skill.Remote {
+			actions = append(actions,
+				skillAction{key: "m", label: "Move to another scope", event: "m"},
+				skillAction{key: "p", label: "Copy to another scope", event: "p"},
+			)
+		}
+		actions = append(actions, skillAction{key: "r", label: "Remove from library", event: "r"})
 	} else if skill.ConflictID == "" && len(skill.Issues) == 0 {
 		actions = append(actions, skillAction{key: "a", label: "Add to library", event: "a"})
 	}
