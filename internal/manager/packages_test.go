@@ -64,7 +64,7 @@ func TestProjectPackageLifecycle(t *testing.T) {
 	}
 }
 
-func TestGroupsResolveNestedAndPreserveSharedSkills(t *testing.T) {
+func TestGroupsInstallAsPresetSnapshots(t *testing.T) {
 	global, project, sample := packageFixture(t)
 	secondPath := filepath.Join(global.Config.Home, ".agents", "skills", "second")
 	skill(t, secondPath)
@@ -86,12 +86,18 @@ func TestGroupsResolveNestedAndPreserveSharedSkills(t *testing.T) {
 	if err = project.ApplyPackages(plan); err != nil {
 		t.Fatal(err)
 	}
-	remove, err := project.PreviewPackages("remove", []string{"@ios"})
+	if err := global.DeleteGroup("ios"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := project.PreviewPackages("sync", nil); err != nil {
+		t.Fatalf("deleting a preset changed the installed project: %v", err)
+	}
+	remove, err := project.PreviewPackages("remove", []string{second.Name})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(remove.After.Skills) != 1 || remove.After.Skills[0].Name != sample.Name {
-		t.Fatalf("shared explicit dependency was removed: %+v", remove.After)
+		t.Fatalf("removing one preset member removed another: %+v", remove.After)
 	}
 }
 

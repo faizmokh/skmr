@@ -42,13 +42,17 @@ func TestResponsiveRenderSizesAndViewLabels(t *testing.T) {
 
 		m.width, m.height = 80, 24
 		view := m.View()
-		for _, label := range []string{"All skills", "Library", "Other folders"} {
+		libraryLabel := "Library"
+		if project {
+			libraryLabel = "Project placements"
+		}
+		for _, label := range []string{"All skills", libraryLabel, "Other folders"} {
 			if !strings.Contains(view, label) {
 				t.Fatalf("80-column view omitted %q", label)
 			}
 		}
-		if project && !strings.Contains(view, "Parent scopes") {
-			t.Fatal("80-column project view omitted Parent scopes")
+		if project && !strings.Contains(view, "Available skills") {
+			t.Fatal("80-column project view omitted Available skills")
 		}
 		if strings.Contains(view, "press / to search") {
 			t.Fatal("80-column view should hide passive search guidance")
@@ -168,7 +172,7 @@ func TestCompactPaneNavigationAndSearchClearing(t *testing.T) {
 
 func TestReviewQuitAndScrollRanges(t *testing.T) {
 	m := model(t)
-	m.pending = &manager.Plan{Action: "adopt"}
+	m.pending = &manager.OperationPlan{Action: "adopt"}
 	m.pane = paneReview
 	_, cmd := key(m, "q")
 	if cmd == nil {
@@ -207,9 +211,8 @@ func TestEveryPaneRendersWithinCompactBounds(t *testing.T) {
 		{"help", func(m *Model) { m.pane = paneHelp }, "Help"},
 		{"review", func(m *Model) {
 			m.pane = paneReview
-			m.pending = &manager.Plan{Action: "adopt"}
+			m.pending = &manager.OperationPlan{Action: "adopt"}
 		}, "Confirm add to library"},
-		{"transfer", func(m *Model) { m.transferAction = "move" }, "Move skill"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -238,8 +241,8 @@ func TestActionDefinitionsDrivePickerAndFooter(t *testing.T) {
 		want  []string
 	}{
 		{"outside", skills.Skill{}, []string{"i", "a"}},
-		{"managed", skills.Skill{Managed: true}, []string{"i", "e", "m", "p", "r"}},
-		{"enabled", skills.Skill{Managed: true, Enabled: true}, []string{"i", "d", "m", "p", "r"}},
+		{"managed", skills.Skill{Managed: true}, []string{"i", "e", "r", "D"}},
+		{"enabled", skills.Skill{Managed: true, Enabled: true}, []string{"i", "d", "r"}},
 		{"copies", skills.Skill{ConflictID: "copies"}, []string{"i", "c"}},
 		{"parent", skills.Skill{Inherited: true}, []string{"i", "o"}},
 		{"view only", skills.Skill{ReadOnly: true}, []string{"i"}},
@@ -345,8 +348,6 @@ func TestActionSpecificSuccessNotices(t *testing.T) {
 		"enable":  "Enabled for agent discovery.",
 		"disable": "Disabled for agent discovery.",
 		"restore": "Removed from library.",
-		"move":    "Moved to the destination library.",
-		"copy":    "Copied to the destination library.",
 	}
 	for action, want := range tests {
 		if got := successNotice(action); !strings.HasPrefix(got, want) {

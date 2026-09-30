@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/faizmokh/skmr/internal/agents"
 )
 
 const (
@@ -22,14 +24,24 @@ type Origin struct {
 }
 
 type Record struct {
-	ID       string        `json:"id"`
-	Name     string        `json:"name"`
-	Original string        `json:"original"`
-	Library  string        `json:"library"`
-	Links    []string      `json:"links"`
-	Enabled  bool          `json:"enabled"`
-	Origins  []Origin      `json:"origins,omitempty"`
-	Remote   *RemoteSource `json:"remote,omitempty"`
+	ID           string           `json:"id"`
+	Name         string           `json:"name"`
+	Original     string           `json:"original"`
+	Library      string           `json:"library"`
+	Links        []string         `json:"links"`
+	Enabled      bool             `json:"enabled"`
+	Origins      []Origin         `json:"origins,omitempty"`
+	Remote       *RemoteSource    `json:"remote,omitempty"`
+	MigratedFrom *MigrationOrigin `json:"migrated_from,omitempty"`
+	ImportedFrom string           `json:"imported_from,omitempty"`
+}
+
+// MigrationOrigin preserves the restore destination of a project-owned skill
+// after its content moves into the personal library.
+type MigrationOrigin struct {
+	Project string   `json:"project"`
+	Path    string   `json:"path"`
+	Origins []Origin `json:"origins,omitempty"`
 }
 
 // RemoteSource identifies content imported from an internet source.
@@ -42,6 +54,40 @@ type RemoteSource struct {
 type Manifest struct {
 	Version int      `json:"version"`
 	Records []Record `json:"records"`
+	// Returned origins remain outside automatic ownership until explicitly added.
+	Returned []string `json:"returned,omitempty"`
+}
+
+func cloneManifest(m Manifest) Manifest {
+	m.Version = Version
+	m.Records = append([]Record{}, m.Records...)
+	m.Returned = append([]string(nil), m.Returned...)
+	return m
+}
+
+func forgetReturned(m *Manifest, paths ...string) {
+	var kept []string
+	for _, path := range m.Returned {
+		forget := false
+		for _, adopted := range paths {
+			forget = forget || path == adopted
+		}
+		if !forget {
+			kept = append(kept, path)
+		}
+	}
+	m.Returned = kept
+}
+
+func validateReturned(paths []string) error {
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path || seen[path] {
+			return fmt.Errorf("invalid returned origin %q", path)
+		}
+		seen[path] = true
+	}
+	return nil
 }
 
 type Identity struct {
@@ -78,6 +124,9 @@ func (s *Service) load() (Manifest, error) {
 	}
 	legacy := m.Version == legacyVersion
 	m.Version = Version
+	if err := validateReturned(m.Returned); err != nil {
+		return m, err
+	}
 	ids := map[string]bool{}
 	for i := range m.Records {
 		r := &m.Records[i]
@@ -119,6 +168,45 @@ func (s *Service) validate(r Record) error {
 	}
 	if r.Library != filepath.Join(s.Store, "library", r.ID, r.Name) {
 		return fmt.Errorf("invalid library path for %s", r.ID)
+	}
+	if r.ImportedFrom != "" && (s.Config.Project != "" || !filepath.IsAbs(r.ImportedFrom) || filepath.Clean(r.ImportedFrom) != r.ImportedFrom || r.Original != filepath.Join(s.Shared(), r.Name) || r.MigratedFrom != nil || r.Remote != nil) {
+		return fmt.Errorf("invalid local import source for %s", r.ID)
+	}
+	if r.MigratedFrom != nil {
+		origin := r.MigratedFrom
+		if s.Config.Project != "" || !filepath.IsAbs(origin.Project) || !filepath.IsAbs(origin.Path) || filepath.Clean(origin.Project) != origin.Project || filepath.Clean(origin.Path) != origin.Path || !within(origin.Project, origin.Path) {
+			return fmt.Errorf("invalid migration origin for %s", r.ID)
+		}
+		allowed := false
+		for _, root := range agents.Project(origin.Project, false) {
+			allowed = allowed || within(root.Path, origin.Path) && origin.Path != root.Path
+		}
+		if !allowed {
+			return fmt.Errorf("invalid migration origin for %s", r.ID)
+		}
+		canonical := 0
+		seen := map[string]bool{}
+		for _, old := range origin.Origins {
+			permitted := false
+			for _, root := range agents.Project(origin.Project, false) {
+				permitted = permitted || old.Path != root.Path && within(root.Path, old.Path)
+			}
+			if !permitted || seen[old.Path] || !filepath.IsAbs(old.Path) {
+				return fmt.Errorf("invalid migrated copy origin for %s", r.ID)
+			}
+			seen[old.Path] = true
+			if old.Canonical {
+				canonical++
+				if old.Path != origin.Path || old.Backup != "" {
+					return fmt.Errorf("invalid migrated canonical copy")
+				}
+			} else if old.Backup == "" || !within(filepath.Join(s.Store, "library", r.ID, ".skmr-duplicates"), old.Backup) {
+				return fmt.Errorf("invalid migrated duplicate backup")
+			}
+		}
+		if len(origin.Origins) > 0 && canonical != 1 {
+			return fmt.Errorf("missing migrated canonical copy")
+		}
 	}
 	if r.Remote != nil {
 		_, _, sourceErr := normalizeRemote(r.Remote.URL)

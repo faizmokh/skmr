@@ -79,6 +79,7 @@ func (s *Service) List() (skills.Result, error) {
 				item.Remote = true
 				item.SourceURL = r.Remote.URL
 			}
+			item.SourcePath = r.ImportedFrom
 			item.Scope = set.scope
 			item.OwnerProject = set.project
 			item.Inherited = set.inherited
@@ -149,7 +150,7 @@ func (s *Service) annotateInstalledPackages(out *skills.Result) {
 		out.Issues = append(out.Issues, err.Error())
 		return
 	}
-	resolved, resolveErr := s.resolvePackages(packages.Requests)
+	resolved, resolveErr := s.resolvePackages(packages.Requests, nil)
 	if resolveErr != nil {
 		out.Issues = append(out.Issues, "Project packages: "+resolveErr.Error())
 	} else if !reflect.DeepEqual(resolved, packages) {
@@ -377,9 +378,6 @@ func (s *Service) adoption(path string, m Manifest) (Record, error) {
 	if err = available(r.Library); err != nil {
 		return Record{}, err
 	}
-	if err = sameDevice(p, r.Library); err != nil {
-		return Record{}, err
-	}
 	if err = validateRelocation(p); err != nil {
 		return Record{}, err
 	}
@@ -501,9 +499,6 @@ func (s *Service) resolutionFromResult(id string, manifest Manifest, result skil
 		if err = available(plan.Record.Library); err != nil {
 			return Plan{}, err
 		}
-		if err = sameDevice(selected.Path, plan.Record.Library); err != nil {
-			return Plan{}, err
-		}
 		selectedMove, moveErr := newMovePlan(selected.Path, plan.Record.Library)
 		if moveErr != nil {
 			return Plan{}, moveErr
@@ -524,9 +519,6 @@ func (s *Service) resolutionFromResult(id string, manifest Manifest, result skil
 				}
 				backup := filepath.Join(s.Store, "library", plan.Record.ID, ".skmr-duplicates", skills.ID(origin.Path), existing.Name)
 				if err = available(backup); err != nil {
-					return Plan{}, err
-				}
-				if err = sameDevice(source, backup); err != nil {
 					return Plan{}, err
 				}
 				oldMove, moveErr := newMovePlan(source, backup)
@@ -561,9 +553,6 @@ func (s *Service) resolutionFromResult(id string, manifest Manifest, result skil
 		}
 		backup := filepath.Join(s.Store, "library", plan.Record.ID, ".skmr-duplicates", item.ID, item.Name)
 		if err = available(backup); err != nil {
-			return Plan{}, err
-		}
-		if err = sameDevice(item.Path, backup); err != nil {
 			return Plan{}, err
 		}
 		duplicateMove, moveErr := newMovePlan(item.Path, backup)

@@ -39,6 +39,7 @@ type RemotePlan struct {
 	Stage   string
 	Entries []RemoteEntry
 	Replace bool
+	Before  *Manifest
 }
 
 type RemoteEntry struct {
@@ -87,7 +88,7 @@ func (s *Service) recoverRemoteLocked() error {
 	if err != nil {
 		return err
 	}
-	after := Manifest{Version: Version, Records: append([]Record{}, j.Before.Records...)}
+	after := cloneManifest(j.Before)
 	if j.Action == "import" {
 		for _, entry := range j.Entries {
 			after.Records = append(after.Records, entry.Record)
@@ -164,7 +165,11 @@ func (p RemotePlan) String() string {
 			lines = append(lines, "  "+d)
 		}
 		if p.Action == "import" {
-			lines = append(lines, "  Store disabled in personal library")
+			state := "Store disabled in personal library"
+			if e.Record.Enabled {
+				state = "Store in personal library and enable globally"
+			}
+			lines = append(lines, "  "+state)
 		}
 	}
 	if len(lines) == 0 {
@@ -297,7 +302,7 @@ func SearchRemote(query string) ([]SearchResult, error) {
 		results = append(results, SearchResult{Name: parts[len(parts)-1], URL: link})
 	}
 	if len(results) == 0 && !strings.Contains(plain, "No skills found") {
-		return nil, fmt.Errorf("Skills CLI search output changed; try importing a URL instead")
+		return nil, fmt.Errorf("Skills CLI search output changed; try adding a URL instead")
 	}
 	return results, nil
 }
@@ -422,6 +427,7 @@ func (s *Service) PrepareImport(raw string, names []string) (RemotePlan, error) 
 		p.Cleanup()
 		return RemotePlan{}, err
 	}
+	p.Before = &m
 	for _, name := range names {
 		item := staged[name]
 		for _, existing := range m.Records {
@@ -478,7 +484,7 @@ func (s *Service) PrepareUpdate(id string, replace bool) (RemotePlan, error) {
 	if err != nil {
 		return RemotePlan{}, err
 	}
-	p := RemotePlan{Action: "update", Source: old.Remote.URL, Stage: stage, Replace: replace}
+	p := RemotePlan{Action: "update", Source: old.Remote.URL, Stage: stage, Replace: replace, Before: &m}
 	item := staged[old.Remote.Skill]
 	localDigest, err := skills.Digest(old.Library)
 	if err != nil {
@@ -516,85 +522,9 @@ func (s *Service) ApplyRemote(p RemotePlan) error {
 	if len(p.Entries) == 0 {
 		return nil
 	}
-	unlock, err := s.lock()
+	op, err := s.operationFromRemote(p)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	if s.hasPending() {
-		return fmt.Errorf("recover the interrupted operation before importing")
-	}
-	m, err := s.load()
-	if err != nil {
-		return err
-	}
-	for _, e := range p.Entries {
-		if err = verifyDigest(e.StagedPath, e.Record.Remote.Digest); err != nil {
-			return err
-		}
-		if p.Action == "import" {
-			for _, old := range m.Records {
-				if old.Name == e.Record.Name || old.ID == e.Record.ID {
-					return fmt.Errorf("skill already exists: %s", e.Record.Name)
-				}
-			}
-			if err = available(e.Record.Library); err != nil {
-				return err
-			}
-		} else {
-			if err = verifyDigest(e.Record.Library, e.OldDigest); err != nil {
-				return err
-			}
-		}
-	}
-	journal := remoteJournal{Version: Version, Action: p.Action, Before: m, Entries: p.Entries}
-	if err = atomicJSON(s.remoteJournalPath(), journal); err != nil {
-		return err
-	}
-	fail := func(cause error) error {
-		if recoveryErr := s.recoverRemoteLocked(); recoveryErr != nil {
-			return fmt.Errorf("remote operation paused: %w; recovery failed: %v; run doctor --recover", cause, recoveryErr)
-		}
-		return cause
-	}
-	if p.Action == "import" {
-		for _, e := range p.Entries {
-			if err = copyPackage(e.StagedPath, e.Record.Library, e.Record.Remote.Digest); err != nil {
-				return fail(err)
-			}
-			m.Records = append(m.Records, e.Record)
-		}
-		if err = s.save(m); err != nil {
-			return fail(err)
-		}
-		return s.recoverRemoteLocked()
-	}
-	e := p.Entries[0]
-	temp := filepath.Join(s.Store, "library", e.Record.ID, ".skmr-update")
-	if err = os.Mkdir(temp, 0700); err != nil {
-		return fail(err)
-	}
-	if err = copyTree(e.StagedPath, temp); err != nil {
-		return fail(err)
-	}
-	if err = verifyDigest(temp, e.Record.Remote.Digest); err != nil {
-		return fail(err)
-	}
-	backup := filepath.Join(s.Store, "library", e.Record.ID, ".skmr-backup")
-	if err = renameExclusive(e.Record.Library, backup); err != nil {
-		return fail(err)
-	}
-	if err = renameExclusive(temp, e.Record.Library); err != nil {
-		return fail(err)
-	}
-	for i := range m.Records {
-		if m.Records[i].ID == e.Record.ID {
-			m.Records[i] = e.Record
-			break
-		}
-	}
-	if err = s.save(m); err != nil {
-		return fail(err)
-	}
-	return s.recoverRemoteLocked()
+	return s.ApplyOperation(op)
 }

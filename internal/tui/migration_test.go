@@ -86,11 +86,11 @@ func TestFirstRunMigrationSelectionReviewAndApply(t *testing.T) {
 	}
 	next, _ := m.Update(cmd())
 	m = next.(Model)
-	if m.pendingBatch == nil || !strings.Contains(ansi.Strip(m.View()), "Confirm add skills") {
+	if m.pending == nil || !strings.Contains(ansi.Strip(m.View()), "Confirm add skills") {
 		t.Fatal("combined review missing")
 	}
 	m, _ = key(m, "n")
-	if m.pendingBatch != nil || m.migration == nil {
+	if m.pending != nil || m.migration == nil {
 		t.Fatal("review did not return to selection")
 	}
 	m, cmd = key(m, "enter")

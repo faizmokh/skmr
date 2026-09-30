@@ -37,21 +37,21 @@ var skillViews = []viewDefinition{
 		kind:        viewLibrary,
 		shortcut:    "2",
 		labels:      responsiveViewLabels{full: "Library", compact: "Lib"},
-		description: "Skills stored and controlled by this scope's library.",
-		includes:    func(s skills.Skill) bool { return s.Managed && !s.Inherited },
+		description: "Skills stored in your personal library.",
+		includes:    func(s skills.Skill) bool { return s.Installed || s.Managed && !s.Inherited },
 	},
 	{
 		kind:        viewOtherFolders,
 		shortcut:    "3",
 		labels:      responsiveViewLabels{full: "Other folders", compact: "Other"},
 		description: "Skills found here but not stored by skmr.",
-		includes:    func(s skills.Skill) bool { return !s.Managed && !s.Inherited },
+		includes:    func(s skills.Skill) bool { return !s.Managed && !s.Inherited && !s.Installed },
 	},
 	{
 		kind:        viewParentScopes,
 		shortcut:    "4",
-		labels:      responsiveViewLabels{full: "Parent scopes", compact: "Parents"},
-		description: "Skills visible here but owned by a parent scope.",
+		labels:      responsiveViewLabels{full: "Available skills", compact: "Available"},
+		description: "Library skills and other skills visible from outside this project.",
 		projectOnly: true,
 		includes:    func(s skills.Skill) bool { return s.Inherited },
 	},
@@ -62,6 +62,10 @@ func (m Model) availableViews() []viewDefinition {
 	for _, view := range skillViews {
 		if view.projectOnly && m.service.Scope() != "project" {
 			continue
+		}
+		if view.kind == viewLibrary && m.service.Scope() == "project" {
+			view.labels = responsiveViewLabels{full: "Project placements", compact: "Placed"}
+			view.description = "Personal library skills requested by this project."
 		}
 		out = append(out, view)
 	}

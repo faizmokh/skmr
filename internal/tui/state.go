@@ -94,7 +94,7 @@ func (m Model) problems() []problem {
 
 func (m Model) viewAfterAction(action string) skillView {
 	switch action {
-	case "adopt", "resolve", "move", "copy", "enable", "disable":
+	case "add", "adopt", "resolve", "enable", "disable", "sync":
 		return viewLibrary
 	case "restore":
 		return viewOtherFolders
@@ -158,13 +158,20 @@ func sanitizeNotice(err error) string {
 
 func successNotice(action string) string {
 	prefix := map[string]string{
-		"adopt":   "Added to library.",
-		"resolve": "Kept this copy.",
-		"enable":  "Enabled for agent discovery.",
-		"disable": "Disabled for agent discovery.",
-		"restore": "Removed from library.",
-		"move":    "Moved to the destination library.",
-		"copy":    "Copied to the destination library.",
+		"add":              "Added to this scope.",
+		"remove":           "Placement removed.",
+		"sync":             "Project placements synced.",
+		"update":           "Updated from source.",
+		"group-create":     "Preset created.",
+		"group-delete":     "Preset deleted.",
+		"add-placement":    "Added to this project.",
+		"remove-placement": "Removed from this project.",
+		"adopt":            "Added to library.",
+		"resolve":          "Kept this copy.",
+		"enable":           "Enabled for agent discovery.",
+		"disable":          "Disabled for agent discovery.",
+		"restore":          "Removed from library.",
+		"delete":           "Skill permanently deleted.",
 	}[action]
 	if prefix == "" {
 		prefix = "Change applied."
@@ -174,17 +181,14 @@ func successNotice(action string) string {
 
 func failureNotice(context string, err error) string {
 	prefix := map[string]string{
-		"load":             "Could not read skill folders.",
-		"preview":          "Could not prepare this change.",
-		"batch-preview":    "Could not prepare these changes.",
-		"transfer-preview": "Could not prepare this transfer.",
-		"apply":            "Could not apply this change.",
-		"batch-apply":      "Could not add the selected skills.",
-		"transfer-apply":   "Could not complete this transfer.",
-		"destination":      "Could not open the destination scope.",
-		"scope":            "Could not switch scope.",
-		"owner":            "Could not open the owning scope.",
-		"diff":             "Could not compare these copies.",
+		"load":          "Could not read skill folders.",
+		"preview":       "Could not prepare this change.",
+		"batch-preview": "Could not prepare these changes.",
+		"apply":         "Could not apply this change.",
+		"batch-apply":   "Could not add the selected skills.",
+		"scope":         "Could not switch scope.",
+		"owner":         "Could not open the owning scope.",
+		"diff":          "Could not compare these copies.",
 	}[context]
 	if prefix == "" {
 		prefix = "The operation failed."

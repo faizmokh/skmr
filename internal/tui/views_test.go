@@ -15,12 +15,13 @@ func TestSkillViewsPartitionLocalAndParentSkills(t *testing.T) {
 	m.result.Skills = []skills.Skill{
 		{ID: "library", Name: "library", Managed: true},
 		{ID: "other", Name: "other"},
+		{ID: "placed", Name: "placed", Installed: true, ReadOnly: true},
 		{ID: "parent-library", Name: "parent-library", Managed: true, Inherited: true},
 		{ID: "parent-other", Name: "parent-other", Inherited: true},
 	}
 
 	m.filter = viewLibrary
-	assertSkillIDs(t, m.items(), "library")
+	assertSkillIDs(t, m.items(), "library", "placed")
 	m.filter = viewOtherFolders
 	assertSkillIDs(t, m.items(), "other")
 

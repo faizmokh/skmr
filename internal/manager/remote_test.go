@@ -21,17 +21,23 @@ case "$*" in
     printf '◇  Available Skills\n│\n│    alpha\n│      First skill\n│    beta\n│      Second skill\n└  Use --skill <name> to install specific skills\n'
     exit 0 ;;
 esac
-name=''
+names=''
 previous=''
 for arg in "$@"; do
-  if [ "$previous" = '--skill' ]; then name="$arg"; fi
+  if [ "$previous" = '--skill' ]; then names="$names $arg"; fi
   previous="$arg"
 done
-if [ -z "$name" ]; then exit 2; fi
-path="$(pwd -P)/.agents/skills/$name"
-mkdir -p "$path"
-printf '%s\n' '---' "name: $name" 'description: Example skill' '---' "version ${SKMR_TEST_VERSION:-1}" > "$path/SKILL.md"
-printf 'Progress before JSON\n[\n  {"name":"%s","status":"installed","path":"%s","ref":"main"}\n]\n' "$name" "$path"
+if [ -z "$names" ]; then exit 2; fi
+printf 'Progress before JSON\n[\n'
+separator=''
+for name in $names; do
+  path="$(pwd -P)/.agents/skills/$name"
+  mkdir -p "$path"
+  printf '%s\n' '---' "name: $name" 'description: Example skill' '---' "version ${SKMR_TEST_VERSION:-1}" > "$path/SKILL.md"
+  printf '%s{"name":"%s","status":"installed","path":"%s","ref":"main"}' "$separator" "$name" "$path"
+  separator=','
+done
+printf '\n]\n'
 `
 	path := filepath.Join(bin, "npx")
 	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
@@ -55,6 +61,132 @@ func remoteService(t *testing.T) *Service {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func remoteProject(t *testing.T, global *Service) *Service {
+	t.Helper()
+	project := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(project, 0755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{Home: global.Config.Home, DataHome: global.Config.DataHome, ConfigHome: global.Config.ConfigHome, Project: project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestRemoteAddMultipleReuseAndConflict(t *testing.T) {
+	fakeSkillsCLI(t)
+	global := remoteService(t)
+	project := remoteProject(t, global)
+	url := "https://github.com/example/skills"
+	plan, err := project.PrepareRemoteAdd(url, []string{"alpha", "beta"})
+	if err != nil || len(plan.Remote.Entries) != 2 || len(plan.Package.AddLinks) != 2 {
+		t.Fatalf("preview: %+v, %v", plan, err)
+	}
+	if err = project.ApplyRemoteAdd(plan); err != nil {
+		t.Fatal(err)
+	}
+	if project.hasPending() || global.hasPending() {
+		t.Fatal("remote add left recovery journals")
+	}
+	library, err := global.load()
+	if err != nil || len(library.Records) != 2 {
+		t.Fatalf("library: %+v, %v", library, err)
+	}
+	for _, record := range library.Records {
+		if record.Enabled || !owned(filepath.Join(project.Shared(), record.Name), record.Library) {
+			t.Fatalf("skill was not installed project-only: %+v", record)
+		}
+	}
+	reused, err := project.PrepareRemoteAdd(url, []string{"alpha"})
+	if err != nil || len(reused.Remote.Entries) != 0 || len(reused.Reused) != 1 {
+		t.Fatalf("reuse preview: %+v, %v", reused, err)
+	}
+	if err = project.ApplyRemoteAdd(reused); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = project.PrepareRemoteAdd("https://github.com/other/skills", []string{"alpha"}); err == nil || !strings.Contains(err.Error(), "another source") {
+		t.Fatalf("source collision accepted: %v", err)
+	}
+}
+
+func TestRemoteAddPreflightAndRecovery(t *testing.T) {
+	fakeSkillsCLI(t)
+	global := remoteService(t)
+	project := remoteProject(t, global)
+	path := filepath.Join(project.Shared(), "alpha")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := project.PrepareRemoteAdd("https://github.com/example/skills", []string{"alpha"}); err == nil || !strings.Contains(err.Error(), "occupied") {
+		t.Fatalf("occupied project path accepted: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := project.PrepareRemoteAdd("https://github.com/example/skills", []string{"alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plan.Cleanup()
+	if err = os.MkdirAll(project.Store, 0755); err != nil {
+		t.Fatal(err)
+	}
+	j := remoteAddJournal{Version: Version, Entries: plan.Remote.Entries, Package: plan.Package}
+	if err = atomicJSON(project.remoteAddJournalPath(), j); err != nil {
+		t.Fatal(err)
+	}
+	if err = global.ApplyRemote(plan.Remote); err != nil {
+		t.Fatal(err)
+	}
+	if err = project.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if project.hasPending() || !owned(path, plan.Remote.Entries[0].Record.Library) {
+		t.Fatal("recovery did not finish project installation")
+	}
+}
+
+func TestRemoteAddRecoveryBeforeImportAndDuringProjectWrite(t *testing.T) {
+	for _, stage := range []string{"before-import", "project-journal"} {
+		t.Run(stage, func(t *testing.T) {
+			fakeSkillsCLI(t)
+			global := remoteService(t)
+			project := remoteProject(t, global)
+			plan, err := project.PrepareRemoteAdd("https://github.com/example/skills", []string{"alpha"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer plan.Cleanup()
+			if err = os.MkdirAll(project.Store, 0755); err != nil {
+				t.Fatal(err)
+			}
+			j := remoteAddJournal{Version: Version, Entries: plan.Remote.Entries, Package: plan.Package}
+			if err = atomicJSON(project.remoteAddJournalPath(), j); err != nil {
+				t.Fatal(err)
+			}
+			if stage == "project-journal" {
+				if err = global.ApplyRemote(plan.Remote); err != nil {
+					t.Fatal(err)
+				}
+				if err = atomicJSON(filepath.Join(project.Store, "packages-journal.json"), plan.Package); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err = project.Recover(); err != nil {
+				t.Fatal(err)
+			}
+			if project.hasPending() {
+				t.Fatal("recovery journal remains")
+			}
+			installed := owned(filepath.Join(project.Shared(), "alpha"), plan.Remote.Entries[0].Record.Library)
+			if installed != (stage == "project-journal") {
+				t.Fatalf("unexpected installed state: %v", installed)
+			}
+		})
+	}
 }
 
 func TestRemoteImportUpdateAndProjectLink(t *testing.T) {

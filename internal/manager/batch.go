@@ -150,11 +150,6 @@ func (s *Service) previewBatchAdopt(paths []string) (BatchPlan, error) {
 }
 
 func (s *Service) ApplyBatch(plan BatchPlan) error {
-	unlock, err := s.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
 	if s.hasPending() {
 		return fmt.Errorf("an interrupted operation needs recovery; run doctor --recover")
 	}
@@ -165,10 +160,11 @@ func (s *Service) ApplyBatch(plan BatchPlan) error {
 	if !reflect.DeepEqual(fresh, plan) {
 		return fmt.Errorf("skill state changed since preview; review a fresh batch")
 	}
-	if err = atomicJSON(filepath.Join(s.Store, "batch.json"), plan); err != nil {
+	op, err := s.operationFromBatch(plan)
+	if err != nil {
 		return err
 	}
-	return s.finishBatch(plan)
+	return s.ApplyOperation(op)
 }
 
 func batchResult(plan BatchPlan) (Manifest, error) {

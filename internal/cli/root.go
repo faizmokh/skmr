@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -37,8 +38,52 @@ func New(build BuildInfo) *cobra.Command {
 	root.PersistentFlags().BoolVar(&global, "global", false, "Manage the personal skill scope explicitly")
 	root.PersistentFlags().StringVar(&project, "project", "", "Manage project skills; use 'auto' for the nearest Git root")
 	root.MarkFlagsMutuallyExclusive("global", "project")
-	var importCommand *cobra.Command
-	service := func() (*manager.Service, error) { return manager.Environment(project) }
+	var addCommand *cobra.Command
+	service := func() (*manager.Service, error) { return manager.DefaultEnvironment(project, global) }
+	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		name := cmd.Name()
+		if name == "skmr" || name == "version" || name == "tui" || name == "doctor" {
+			return nil
+		}
+		// Explicit dry runs preserve their source files and state. Normal first
+		// access adopts discovered skills; diagnostics can inspect old journals.
+		if flag := cmd.Flags().Lookup("dry-run"); flag != nil && flag.Value.String() == "true" {
+			return nil
+		}
+		target := project
+		if name == "update" || name == "enable" || name == "disable" || name == "restore" || name == "delete" {
+			target = ""
+		}
+		if (name == "add" || name == "remove" || name == "sync") && !global && target == "" {
+			target = "auto"
+		}
+		s, err := manager.Environment(target)
+		if name == "list" || name == "show" || name == "adopt" || name == "resolve" || name == "search" {
+			s, err = service()
+		}
+		if err != nil {
+			return err
+		}
+		if name == "adopt" {
+			return s.Upgrade()
+		}
+		var excluded []string
+		if name == "add" && len(args) == 1 && looksLikePath(args[0]) && !strings.Contains(args[0], "://") {
+			excluded = args
+		}
+		if err = s.AutoAdoptExcept(excluded); err != nil {
+			return err
+		}
+		if name == "list" || name == "show" {
+			return nil
+		}
+		if conflicts, err := s.AutoAdoptConflicts(); err != nil {
+			return err
+		} else if conflicts != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Writable copies need a choice before adoption: %s\n", terminal.Safe(conflicts))
+		}
+		return nil
+	}
 	launch := func(cmd *cobra.Command, args []string) error {
 		s, err := service()
 		if err != nil {
@@ -69,104 +114,7 @@ func New(build BuildInfo) *cobra.Command {
 		},
 	})
 	{
-		var selected []string
-		var dry, yes bool
-		cmd := &cobra.Command{Use: "import [url]", Short: "Import GitHub or skills.sh skills into the personal library", Args: cobra.MaximumNArgs(1)}
-		importCommand = cmd
-		cmd.Flags().StringSliceVar(&selected, "skill", nil, "Select a skill by name (repeatable)")
-		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview without changing the library")
-		cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the preview without prompting")
-		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			if project != "" {
-				return fmt.Errorf("imports use the personal library; omit --project")
-			}
-			if len(args) == 0 {
-				if !isTerminal(cmd.InOrStdin()) {
-					return fmt.Errorf("provide a GitHub or skills.sh URL")
-				}
-				fmt.Fprint(cmd.OutOrStdout(), "GitHub or skills.sh URL: ")
-				line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-				if e != nil {
-					return e
-				}
-				args = []string{strings.TrimSpace(line)}
-			}
-			s, err := manager.Environment("")
-			if err != nil {
-				return err
-			}
-			candidates, err := s.DiscoverRemote(args[0])
-			if err != nil {
-				return err
-			}
-			choices := append([]string{}, selected...)
-			if len(choices) == 0 {
-				if len(candidates) == 1 {
-					choices = []string{candidates[0].Name}
-				} else {
-					if !isTerminal(cmd.InOrStdin()) {
-						return fmt.Errorf("source contains %d skills; pass --skill <name> to select", len(candidates))
-					}
-					fmt.Fprintln(cmd.OutOrStdout(), "Available skills:")
-					for i, candidate := range candidates {
-						fmt.Fprintf(cmd.OutOrStdout(), "  %d. %s\n", i+1, terminal.Safe(candidate.Name))
-					}
-					fmt.Fprint(cmd.OutOrStdout(), "Select numbers (comma separated): ")
-					line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-					if e != nil {
-						return e
-					}
-					for _, part := range strings.Split(strings.TrimSpace(line), ",") {
-						n, e := strconv.Atoi(strings.TrimSpace(part))
-						if e != nil || n < 1 || n > len(candidates) {
-							return fmt.Errorf("invalid skill selection %q", part)
-						}
-						choices = append(choices, candidates[n-1].Name)
-					}
-				}
-			}
-			allowed := map[string]bool{}
-			for _, candidate := range candidates {
-				allowed[candidate.Name] = true
-			}
-			for _, choice := range choices {
-				if !allowed[choice] {
-					return fmt.Errorf("skill %q is not available from this source", choice)
-				}
-			}
-			plan, err := s.PrepareImport(args[0], choices)
-			if err != nil {
-				return err
-			}
-			defer plan.Cleanup()
-			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
-			if dry {
-				return nil
-			}
-			if !yes {
-				if !isTerminal(cmd.InOrStdin()) {
-					return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
-				}
-				fmt.Fprint(cmd.OutOrStdout(), "Import these skills? [y/N] ")
-				line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-				if e != nil {
-					return e
-				}
-				if response := strings.ToLower(strings.TrimSpace(line)); response != "y" && response != "yes" {
-					fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
-					return nil
-				}
-			}
-			if err = s.ApplyRemote(plan); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Done: imported %d disabled skills.\n", len(plan.Entries))
-			return nil
-		}
-		root.AddCommand(cmd)
-	}
-	{
-		cmd := &cobra.Command{Use: "search [query]", Short: "Search skills.sh for skills to import", Args: cobra.ArbitraryArgs}
+		cmd := &cobra.Command{Use: "search [query]", Short: "Search skills.sh for skills to add", Args: cobra.ArbitraryArgs}
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				if !isTerminal(cmd.InOrStdin()) {
@@ -193,7 +141,7 @@ func New(build BuildInfo) *cobra.Command {
 			if !isTerminal(cmd.InOrStdin()) {
 				return nil
 			}
-			fmt.Fprint(cmd.OutOrStdout(), "Open result number for import (Enter to skip): ")
+			fmt.Fprint(cmd.OutOrStdout(), "Open result number to add (Enter to skip): ")
 			line, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 			if e != nil {
 				return e
@@ -206,7 +154,11 @@ func New(build BuildInfo) *cobra.Command {
 			if e != nil || n < 1 || n > len(results) {
 				return fmt.Errorf("invalid result number")
 			}
-			return importCommand.RunE(importCommand, []string{results[n-1].URL})
+			selection := []string{results[n-1].URL}
+			if err := root.PersistentPreRunE(addCommand, selection); err != nil {
+				return err
+			}
+			return addCommand.RunE(addCommand, selection)
 		}
 		root.AddCommand(cmd)
 	}
@@ -224,13 +176,13 @@ func New(build BuildInfo) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			plan, err := s.PrepareUpdate(args[0], replace)
+			plan, err := s.PreviewOperation(manager.OperationRequest{Action: "update", Arguments: args, Replace: replace})
 			if err != nil {
 				return err
 			}
-			defer plan.Cleanup()
+			defer plan.Discard()
 			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
-			if dry || len(plan.Entries) == 0 {
+			if dry || len(plan.Content) == 0 {
 				return nil
 			}
 			if !yes {
@@ -247,7 +199,7 @@ func New(build BuildInfo) *cobra.Command {
 					return nil
 				}
 			}
-			if err = s.ApplyRemote(plan); err != nil {
+			if err = s.ApplyOperation(plan); err != nil {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "Done: skill updated.")
@@ -272,6 +224,11 @@ func New(build BuildInfo) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
+			if kind == "list" || kind == "show" {
+				if err = s.AutoAdopt(); err != nil {
+					return err
+				}
+			}
 			switch kind {
 			case "list":
 				result, e := s.List()
@@ -396,65 +353,26 @@ func New(build BuildInfo) *cobra.Command {
 					return nil
 				}
 			}
-
+			action := "adopt-batch"
 			if len(paths) == 1 {
-				plan, previewErr := s.Preview("adopt", paths[0])
-				if previewErr != nil {
-					return previewErr
-				}
-				fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
-				if dry {
-					return nil
-				}
-				if !yes {
-					if !isTerminal(cmd.InOrStdin()) {
-						return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
-					}
-					fmt.Fprint(cmd.OutOrStdout(), "Apply these changes? [y/N] ")
-					response, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-					if readErr != nil {
-						return readErr
-					}
-					response = strings.ToLower(strings.TrimSpace(response))
-					if response != "y" && response != "yes" {
-						fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
-						return nil
-					}
-				}
-				if err = s.Apply(plan); err != nil {
-					return err
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Done: adopted %s.\n", oneLine(plan.Record.Name))
-				return nil
+				action = "adopt"
 			}
-
-			plan, err := s.PreviewBatchAdopt(paths)
+			plan, err := s.PreviewOperation(manager.OperationRequest{Action: action, Arguments: paths})
 			if err != nil {
 				return err
 			}
+			defer plan.Discard()
 			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
 			if dry {
 				return nil
 			}
-			if !yes {
-				if !isTerminal(cmd.InOrStdin()) {
-					return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
-				}
-				fmt.Fprint(cmd.OutOrStdout(), "Apply these changes? [y/N] ")
-				response, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-				if readErr != nil {
-					return readErr
-				}
-				response = strings.ToLower(strings.TrimSpace(response))
-				if response != "y" && response != "yes" {
-					fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
-					return nil
-				}
-			}
-			if err = s.ApplyBatch(plan); err != nil {
+			if err = confirmCLI(cmd, yes, "Apply these changes?"); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Done: added %d skills to the library.\n", len(plan.Plans))
+			if err = s.ApplyOperation(plan); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Done: added %d skills to the library.\n", len(paths))
 			return nil
 		}
 		root.AddCommand(cmd)
@@ -468,11 +386,17 @@ func New(build BuildInfo) *cobra.Command {
 			cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the preview without prompting")
 		}
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			s, err := service()
+			if project != "" && action != "resolve" {
+				return fmt.Errorf("%s changes the personal library; use add or remove for project placements", action)
+			}
+			s, err := manager.Environment("")
+			if action == "resolve" {
+				s, err = service()
+			}
 			if err != nil {
 				return err
 			}
-			p, err := s.Preview(action, args[0])
+			p, err := s.PreviewOperation(manager.OperationRequest{Action: action, Arguments: args})
 			if err != nil {
 				return err
 			}
@@ -495,44 +419,28 @@ func New(build BuildInfo) *cobra.Command {
 					return nil
 				}
 			}
-			if err = s.Apply(p); err != nil {
+			if err = s.ApplyOperation(p); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Done: %s %s.\n", action, oneLine(p.Record.Name))
+			fmt.Fprintf(cmd.OutOrStdout(), "Done: %s %s.\n", action, oneLine(args[0]))
 			return nil
 		}
 		root.AddCommand(cmd)
 	}
-	for _, action := range []string{"move", "copy"} {
-		var yes, dry, toGlobal bool
-		var toProject string
-		cmd := &cobra.Command{
-			Use:   action + " <id>",
-			Short: map[string]string{"move": "Move a managed skill to another scope", "copy": "Copy a managed skill independently to another scope"}[action],
-			Args:  cobra.ExactArgs(1),
-		}
-		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview changes without writing files")
-		cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply the preview without prompting")
-		cmd.Flags().BoolVar(&toGlobal, "to-global", false, "Use the global library as the destination")
-		cmd.Flags().StringVar(&toProject, "to-project", "", "Use a project library as the destination; accepts 'auto'")
-		cmd.MarkFlagsMutuallyExclusive("to-global", "to-project")
+	{
+		var dry, yes bool
+		cmd := &cobra.Command{Use: "delete <name-or-id>", Short: "Permanently delete a library skill", Args: cobra.ExactArgs(1)}
+		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview deletion without changing files")
+		cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Delete after reviewing the preview without prompting")
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			if toGlobal == (toProject != "") {
-				return fmt.Errorf("set exactly one of --to-global or --to-project")
+			if project != "" {
+				return fmt.Errorf("delete changes the personal library; remove project placements first")
 			}
-			source, err := service()
+			s, err := manager.Environment("")
 			if err != nil {
 				return err
 			}
-			destinationProject := toProject
-			if toGlobal {
-				destinationProject = ""
-			}
-			destination, err := manager.New(manager.Config{Home: source.Config.Home, DataHome: source.Config.DataHome, ConfigHome: source.Config.ConfigHome, Project: destinationProject})
-			if err != nil {
-				return err
-			}
-			plan, err := source.PreviewTransfer(action, args[0], destination)
+			plan, err := s.PreviewOperation(manager.OperationRequest{Action: "delete", Arguments: args})
 			if err != nil {
 				return err
 			}
@@ -544,21 +452,20 @@ func New(build BuildInfo) *cobra.Command {
 				if !isTerminal(cmd.InOrStdin()) {
 					return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
 				}
-				fmt.Fprint(cmd.OutOrStdout(), "Apply these changes? [y/N] ")
-				response, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-				if readErr != nil {
-					return readErr
+				fmt.Fprint(cmd.OutOrStdout(), "Permanently delete this skill? [y/N] ")
+				response, e := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if e != nil {
+					return e
 				}
-				response = strings.ToLower(strings.TrimSpace(response))
-				if response != "y" && response != "yes" {
+				if response = strings.ToLower(strings.TrimSpace(response)); response != "y" && response != "yes" {
 					fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
 					return nil
 				}
 			}
-			if err = source.ApplyTransfer(destination, plan); err != nil {
+			if err := s.ApplyOperation(plan); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Done: %s %s to %s.\n", action, oneLine(plan.SourceRecord.Name), scopeName(destination))
+			fmt.Fprintf(cmd.OutOrStdout(), "Done: deleted %s.\n", oneLine(args[0]))
 			return nil
 		}
 		root.AddCommand(cmd)
@@ -574,10 +481,11 @@ func New(build BuildInfo) *cobra.Command {
 		return manager.Environment(target)
 	}
 	for _, action := range []string{"add", "remove", "sync"} {
-		var dry bool
+		var dry, yes bool
+		var selected []string
 		use := action + " <skill|@group>..."
 		short := map[string]string{
-			"add":    "Add central-library skills to the current project",
+			"add":    "Add library or remote skills to the current project",
 			"remove": "Remove direct skill or group requests from the current project",
 			"sync":   "Reconcile current-project skills with its package manifest",
 		}[action]
@@ -585,18 +493,129 @@ func New(build BuildInfo) *cobra.Command {
 		if action == "sync" {
 			use = "sync"
 			args = cobra.NoArgs
+		} else if action == "add" {
+			use = "add <skill|@group>... | <url>"
+			args = cobra.ArbitraryArgs
 		}
 		cmd := &cobra.Command{Use: use, Short: short, Args: args}
 		if action == "add" {
 			cmd.Aliases = []string{"install"}
+			addCommand = cmd
+			cmd.Flags().StringSliceVar(&selected, "skill", nil, "Select a remote skill by name (repeatable)")
+			cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Apply a remote add without prompting")
 		}
 		cmd.Flags().BoolVar(&dry, "dry-run", false, "Preview changes without writing files")
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			if action == "add" && len(args) == 0 && isTerminal(cmd.InOrStdin()) {
+				fmt.Fprint(cmd.OutOrStdout(), "GitHub or skills.sh URL: ")
+				line, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if readErr != nil {
+					return readErr
+				}
+				args = []string{strings.TrimSpace(line)}
+			}
+			if action == "add" && len(args) == 0 {
+				return fmt.Errorf("provide a skill name, group, or GitHub/skills.sh URL")
+			}
+			if global {
+				return runGlobalPlacement(cmd, action, args, selected, dry, yes)
+			}
 			s, err := packageService()
 			if err != nil {
 				return err
 			}
-			plan, err := s.PreviewPackages(action, args)
+			if action == "add" && len(args) == 1 && !strings.Contains(args[0], "://") && looksLikePath(args[0]) {
+				plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: args})
+				if err != nil {
+					return err
+				}
+				defer plan.Discard()
+				fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+				if dry {
+					return nil
+				}
+				if err = confirmCLI(cmd, yes, "Add this skill to the project?"); err != nil {
+					return err
+				}
+				return s.ApplyOperation(plan)
+			}
+			if action == "add" && len(args) == 1 && strings.Contains(args[0], "://") {
+				globalService, e := manager.Environment("")
+				if e != nil {
+					return e
+				}
+				candidates, e := globalService.DiscoverRemote(args[0])
+				if e != nil {
+					return e
+				}
+				choices := append([]string{}, selected...)
+				if len(choices) == 0 {
+					if len(candidates) == 1 {
+						choices = []string{candidates[0].Name}
+					} else {
+						if !isTerminal(cmd.InOrStdin()) {
+							return fmt.Errorf("source contains %d skills; pass --skill <name> to select", len(candidates))
+						}
+						fmt.Fprintln(cmd.OutOrStdout(), "Available skills:")
+						for i, candidate := range candidates {
+							fmt.Fprintf(cmd.OutOrStdout(), "  %d. %s\n", i+1, terminal.Safe(candidate.Name))
+						}
+						fmt.Fprint(cmd.OutOrStdout(), "Select numbers (comma separated): ")
+						line, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+						if readErr != nil {
+							return readErr
+						}
+						for _, part := range strings.Split(strings.TrimSpace(line), ",") {
+							n, parseErr := strconv.Atoi(strings.TrimSpace(part))
+							if parseErr != nil || n < 1 || n > len(candidates) {
+								return fmt.Errorf("invalid skill selection %q", part)
+							}
+							choices = append(choices, candidates[n-1].Name)
+						}
+					}
+				}
+				allowed := map[string]bool{}
+				for _, candidate := range candidates {
+					allowed[candidate.Name] = true
+				}
+				for _, choice := range choices {
+					if !allowed[choice] {
+						return fmt.Errorf("skill %q is not available from this source", choice)
+					}
+				}
+				plan, e := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: args, Skills: choices})
+				if e != nil {
+					return e
+				}
+				defer plan.Discard()
+				fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+				if dry {
+					return nil
+				}
+				if !yes {
+					if !isTerminal(cmd.InOrStdin()) {
+						return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
+					}
+					fmt.Fprint(cmd.OutOrStdout(), "Add these skills to the project? [y/N] ")
+					line, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+					if readErr != nil {
+						return readErr
+					}
+					if response := strings.ToLower(strings.TrimSpace(line)); response != "y" && response != "yes" {
+						fmt.Fprintln(cmd.OutOrStdout(), "No changes made.")
+						return nil
+					}
+				}
+				if e = s.ApplyOperation(plan); e != nil {
+					return e
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Done: project now has %d skills from %d requests.\n", projectSkillCount(plan), projectRequestCount(plan))
+				return nil
+			}
+			if action == "add" && (len(selected) > 0 || len(args) != 1 && containsURL(args)) {
+				return fmt.Errorf("--skill requires exactly one remote URL")
+			}
+			plan, err := s.PreviewOperation(manager.OperationRequest{Action: action, Arguments: args})
 			if err != nil {
 				return err
 			}
@@ -604,21 +623,30 @@ func New(build BuildInfo) *cobra.Command {
 			if dry {
 				return nil
 			}
-			if err = s.ApplyPackages(plan); err != nil {
+			if err = s.ApplyOperation(plan); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Done: project now has %d skills from %d requests.\n", len(plan.After.Skills), len(plan.After.Requests))
+			fmt.Fprintf(cmd.OutOrStdout(), "Done: project now has %d skills from %d requests.\n", projectSkillCount(plan), projectRequestCount(plan))
 			return nil
 		}
 		root.AddCommand(cmd)
 	}
 	{
 		group := &cobra.Command{Use: "group", Short: "Manage reusable central-library skill groups"}
+		var groupDry bool
+		group.PersistentFlags().BoolVar(&groupDry, "dry-run", false, "Preview preset changes without writing files")
 		group.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 			if project != "" {
 				return fmt.Errorf("groups are global definitions; omit --project")
 			}
-			return nil
+			if groupDry || cmd.Name() == "delete" {
+				return nil
+			}
+			s, err := manager.Environment("")
+			if err != nil {
+				return err
+			}
+			return s.AutoAdopt()
 		}
 		var asJSON bool
 		list := &cobra.Command{Use: "list", Short: "List installable groups", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
@@ -645,34 +673,176 @@ func New(build BuildInfo) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			created, err := s.CreateGroup(args[0], args[1:])
+			plan, err := s.PreviewOperation(manager.OperationRequest{Action: "group-create", Arguments: args})
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Created group @%s with %d members.\n", oneLine(created.Name), len(created.Members))
-			return nil
+			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+			if groupDry {
+				return nil
+			}
+			return s.ApplyOperation(plan)
 		}})
 		group.AddCommand(&cobra.Command{Use: "delete <name>", Short: "Delete an installable skill group", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := manager.Environment("")
 			if err != nil {
 				return err
 			}
-			if err = s.DeleteGroup(strings.TrimPrefix(args[0], "@")); err != nil {
+			plan, err := s.PreviewOperation(manager.OperationRequest{Action: "group-delete", Arguments: []string{strings.TrimPrefix(args[0], "@")}})
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Deleted group @%s.\n", oneLine(strings.TrimPrefix(args[0], "@")))
-			return nil
+			fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+			if groupDry {
+				return nil
+			}
+			return s.ApplyOperation(plan)
 		}})
 		root.AddCommand(group)
 	}
 	return root
 }
 
-func scopeName(s *manager.Service) string {
-	if s.Config.Project == "" {
-		return "global"
+func runGlobalPlacement(cmd *cobra.Command, action string, args, selected []string, dry, yes bool) error {
+	if action == "sync" {
+		return fmt.Errorf("sync requires a project")
 	}
-	return s.Config.Project
+	s, err := manager.Environment("")
+	if err != nil {
+		return err
+	}
+	if len(args) == 1 && action == "add" && strings.Contains(args[0], "://") {
+		candidates, err := s.DiscoverRemote(args[0])
+		if err != nil {
+			return err
+		}
+		choices := append([]string{}, selected...)
+		if len(choices) == 0 {
+			if len(candidates) == 1 {
+				choices = []string{candidates[0].Name}
+			} else {
+				if !isTerminal(cmd.InOrStdin()) {
+					return fmt.Errorf("source contains %d skills; pass --skill <name> to select", len(candidates))
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "Available skills:")
+				for i, candidate := range candidates {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %d. %s\n", i+1, terminal.Safe(candidate.Name))
+				}
+				fmt.Fprint(cmd.OutOrStdout(), "Select numbers (comma separated): ")
+				line, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if readErr != nil {
+					return readErr
+				}
+				for _, part := range strings.Split(strings.TrimSpace(line), ",") {
+					n, parseErr := strconv.Atoi(strings.TrimSpace(part))
+					if parseErr != nil || n < 1 || n > len(candidates) {
+						return fmt.Errorf("invalid skill selection %q", part)
+					}
+					choices = append(choices, candidates[n-1].Name)
+				}
+			}
+		}
+		plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: args, Skills: choices})
+		if err != nil {
+			return err
+		}
+		defer plan.Discard()
+		fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+		if dry {
+			return nil
+		}
+		if err = confirmCLI(cmd, yes, "Add and enable these skills globally?"); err != nil {
+			return err
+		}
+		if err = s.ApplyOperation(plan); err != nil {
+			return err
+		}
+
+		return nil
+	}
+	if len(selected) > 0 {
+		return fmt.Errorf("--skill requires one remote URL")
+	}
+	if len(args) == 1 && action == "add" && looksLikePath(args[0]) {
+		plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: args})
+		if err != nil {
+			return err
+		}
+		defer plan.Discard()
+		fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+		if dry {
+			return nil
+		}
+		if err = confirmCLI(cmd, yes, "Add this skill to the library?"); err != nil {
+			return err
+		}
+		return s.ApplyOperation(plan)
+	}
+	if action == "remove" && len(args) == 0 {
+		return fmt.Errorf("provide at least one skill")
+	}
+	plan, err := s.PreviewOperation(manager.OperationRequest{Action: action, Arguments: args})
+	if err != nil {
+		return err
+	}
+	defer plan.Discard()
+	fmt.Fprintln(cmd.OutOrStdout(), terminal.Safe(plan.String()))
+	if dry {
+		return nil
+	}
+	return s.ApplyOperation(plan)
+}
+
+func looksLikePath(value string) bool {
+	if filepath.IsAbs(value) || strings.HasPrefix(value, ".") || strings.ContainsRune(value, filepath.Separator) {
+		return true
+	}
+	info, err := os.Stat(value)
+	return err == nil && info.IsDir()
+}
+
+func projectSkillCount(p manager.OperationPlan) int {
+	for _, scope := range p.Scopes {
+		if scope.RequestsAfter != nil {
+			return len(scope.RequestsAfter.Skills)
+		}
+	}
+	return 0
+}
+func projectRequestCount(p manager.OperationPlan) int {
+	for _, scope := range p.Scopes {
+		if scope.RequestsAfter != nil {
+			return len(scope.RequestsAfter.Requests)
+		}
+	}
+	return 0
+}
+
+func confirmCLI(cmd *cobra.Command, yes bool, prompt string) error {
+	if yes {
+		return nil
+	}
+	if !isTerminal(cmd.InOrStdin()) {
+		return fmt.Errorf("review with --dry-run, then pass --yes in noninteractive use")
+	}
+	fmt.Fprint(cmd.OutOrStdout(), prompt+" [y/N] ")
+	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if response := strings.ToLower(strings.TrimSpace(line)); response != "y" && response != "yes" {
+		return fmt.Errorf("no changes made")
+	}
+	return nil
+}
+
+func containsURL(args []string) bool {
+	for _, arg := range args {
+		if strings.Contains(arg, "://") {
+			return true
+		}
+	}
+	return false
 }
 func displayScope(s skills.Skill) string {
 	if s.OwnerProject != "" {

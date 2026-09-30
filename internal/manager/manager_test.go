@@ -68,14 +68,14 @@ func TestMoveGlobalToProjectAndStopManaging(t *testing.T) {
 	global, source := fixture(t)
 	record := apply(t, global, "adopt", source).Record
 	project := projectService(t, global, "app")
-	plan, err := global.PreviewTransfer("move", record.ID, project)
+	plan, err := global.previewLegacyTransfer("move", record.ID, project)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(plan.String(), "Remove discovery link") || plan.DestinationRecord.ID != record.ID {
 		t.Fatalf("bad move preview: %+v", plan)
 	}
-	if err = global.ApplyTransfer(project, plan); err != nil {
+	if err = global.applyLegacyTransfer(project, plan); err != nil {
 		t.Fatal(err)
 	}
 	globalManifest, _ := global.load()
@@ -101,14 +101,14 @@ func TestCopyBetweenProjectsIsIndependentAndPreservesDisabledState(t *testing.T)
 	skill(t, path)
 	record := apply(t, source, "adopt", path).Record
 	apply(t, source, "disable", record.ID)
-	plan, err := source.PreviewTransfer("copy", record.ID, destination)
+	plan, err := source.previewLegacyTransfer("copy", record.ID, destination)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.DestinationRecord.ID == record.ID || plan.DestinationRecord.Enabled {
 		t.Fatalf("copy identity/state incorrect: %+v", plan.DestinationRecord)
 	}
-	if err = source.ApplyTransfer(destination, plan); err != nil {
+	if err = source.applyLegacyTransfer(destination, plan); err != nil {
 		t.Fatal(err)
 	}
 	if !absent(plan.DestinationRecord.Links[0]) || absent(record.Library) {
@@ -141,11 +141,11 @@ func TestMoveProjectToGlobalAndBetweenProjects(t *testing.T) {
 			path := filepath.Join(source.Config.Project, ".agents", "skills", "moving-skill")
 			skill(t, path)
 			record := apply(t, source, "adopt", path).Record
-			plan, err := source.PreviewTransfer("move", record.ID, destination)
+			plan, err := source.previewLegacyTransfer("move", record.ID, destination)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = source.ApplyTransfer(destination, plan); err != nil {
+			if err = source.applyLegacyTransfer(destination, plan); err != nil {
 				t.Fatal(err)
 			}
 			manifest, err := destination.load()
@@ -160,10 +160,10 @@ func TestTransferValidation(t *testing.T) {
 	global, sourcePath := fixture(t)
 	record := apply(t, global, "adopt", sourcePath).Record
 	project := projectService(t, global, "validation-project")
-	if _, err := global.PreviewTransfer("copy", record.ID, project); err == nil || !strings.Contains(err.Error(), "already contains") {
+	if _, err := global.previewLegacyTransfer("copy", record.ID, project); err == nil || !strings.Contains(err.Error(), "already contains") {
 		t.Fatal("copy over inherited skill was accepted", err)
 	}
-	if _, err := global.PreviewTransfer("move", record.ID, global); err == nil || !strings.Contains(err.Error(), "same") {
+	if _, err := global.previewLegacyTransfer("move", record.ID, global); err == nil || !strings.Contains(err.Error(), "same") {
 		t.Fatal("same-scope transfer was accepted", err)
 	}
 	overlapPath := filepath.Join(record.Library, "nested-project")
@@ -174,7 +174,7 @@ func TestTransferValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = global.PreviewTransfer("move", record.ID, overlap); err == nil || !strings.Contains(err.Error(), "overlaps") {
+	if _, err = global.previewLegacyTransfer("move", record.ID, overlap); err == nil || !strings.Contains(err.Error(), "overlaps") {
 		t.Fatal("overlapping destination was accepted", err)
 	}
 	manifest, err := global.load()
@@ -185,7 +185,7 @@ func TestTransferValidation(t *testing.T) {
 	if err = global.save(manifest); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = global.PreviewTransfer("move", record.ID, project); err == nil || !strings.Contains(err.Error(), "duplicate backups") {
+	if _, err = global.previewLegacyTransfer("move", record.ID, project); err == nil || !strings.Contains(err.Error(), "duplicate backups") {
 		t.Fatal("record with preserved duplicates was accepted", err)
 	}
 }
@@ -200,7 +200,7 @@ func TestTransferRecoveryFromDestination(t *testing.T) {
 				path := filepath.Join(source.Config.Project, ".agents", "skills", "recover-skill")
 				skill(t, path)
 				record := apply(t, source, "adopt", path).Record
-				plan, err := source.PreviewTransfer(action, record.ID, destination)
+				plan, err := source.previewLegacyTransfer(action, record.ID, destination)
 				if err != nil {
 					t.Fatal(err)
 				}

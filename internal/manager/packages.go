@@ -21,15 +21,16 @@ type PackageRef struct {
 	Name string `json:"name"`
 }
 
-// PackageManifest records user requests separately from their resolved skills.
-// Requests are skill names or @group names.
+// PackageManifest records direct skill placements separately from their resolved skills.
+// Groups are expanded when they are added, so later edits cannot silently change a project.
 type PackageManifest struct {
 	Version  int          `json:"version"`
 	Requests []string     `json:"requests"`
 	Skills   []PackageRef `json:"skills"`
 }
 
-// InstallGroup is a reusable set of skill names and nested @group references.
+// InstallGroup is a preset of direct skill names. Legacy nested references are
+// expanded when the personal library is upgraded.
 type InstallGroup struct {
 	Name    string   `json:"name"`
 	Members []string `json:"members"`
@@ -90,6 +91,70 @@ func (s *Service) loadPackages() (PackageManifest, error) {
 		return m, err
 	}
 	return m, nil
+}
+
+// upgradeGroupRequests snapshots legacy live group requests and registers the
+// opened project's placements through the shared operation journal.
+func (s *Service) upgradeGroupRequests() error {
+	if s.Config.Project == "" || s.hasPending() {
+		return nil
+	}
+	before, err := s.loadPackages()
+	if err != nil {
+		return err
+	}
+	needsUpgrade := false
+	for _, request := range before.Requests {
+		needsUpgrade = needsUpgrade || strings.HasPrefix(request, "@")
+	}
+	registry, err := s.loadProjectRegistry()
+	if err != nil {
+		return err
+	}
+	needsUpgrade = needsUpgrade || (len(before.Requests) > 0 || len(before.Skills) > 0) && !contains(registry.Projects, s.Config.Project)
+	if !needsUpgrade {
+		return nil
+	}
+	global, err := New(Config{Home: s.Config.Home, DataHome: s.Config.DataHome, ConfigHome: s.Config.ConfigHome})
+	if err != nil {
+		return err
+	}
+	if s.hasPending() {
+		return nil
+	}
+	before, err = s.loadPackages()
+	if err != nil {
+		return err
+	}
+	requests := legacyDirectRequests(before)
+	after, err := s.resolvePackages(requests, nil)
+	if err != nil {
+		return fmt.Errorf("cannot migrate project groups: %w", err)
+	}
+	plan := PackagePlan{Version: packageManifestVersion, Action: "sync", Before: before, After: after}
+	if global.hasPending() {
+		return fmt.Errorf("recover the personal library before upgrading project requests")
+	}
+	op, err := s.operationFromPackages(plan)
+	if err != nil {
+		return err
+	}
+	return s.ApplyOperation(op)
+}
+
+// Legacy package manifests retain the last resolved skills. Use those pins as
+// the preset snapshot, even if a group definition changed or was deleted.
+func legacyDirectRequests(before PackageManifest) []string {
+	requests := make([]string, 0, len(before.Requests)+len(before.Skills))
+	for _, request := range before.Requests {
+		if !strings.HasPrefix(request, "@") {
+			requests = append(requests, request)
+		}
+	}
+	for _, skill := range before.Skills {
+		requests = append(requests, skill.Name)
+	}
+	return uniqueStrings(requests)
 }
 
 func validatePackageManifest(m PackageManifest) error {
@@ -154,113 +219,103 @@ func (s *Service) Groups() ([]InstallGroup, error) {
 	return m.Groups, err
 }
 
-// CreateGroup creates a named dependency bundle in the central store.
+func (s *Service) previewGroupUpgrade() (OperationPlan, error) {
+	m, err := s.loadGroups()
+	if err != nil {
+		return OperationPlan{}, err
+	}
+	nested := false
+	for _, group := range m.Groups {
+		for _, member := range group.Members {
+			nested = nested || strings.HasPrefix(member, "@")
+		}
+	}
+	if !nested {
+		return OperationPlan{}, nil
+	}
+	before := groupManifest{Version: m.Version, Groups: append([]InstallGroup{}, m.Groups...)}
+	groups := make(map[string]InstallGroup, len(m.Groups))
+	for _, group := range m.Groups {
+		groups[group.Name] = group
+	}
+	resolved := map[string][]string{}
+	visiting := map[string]bool{}
+	var expand func(string) ([]string, error)
+	expand = func(name string) ([]string, error) {
+		if members, ok := resolved[name]; ok {
+			return members, nil
+		}
+		group, ok := groups[name]
+		if !ok {
+			return nil, fmt.Errorf("group %q was not found", name)
+		}
+		if visiting[name] {
+			return nil, fmt.Errorf("group dependency cycle at %q", name)
+		}
+		visiting[name] = true
+		var members []string
+		for _, member := range group.Members {
+			if strings.HasPrefix(member, "@") {
+				children, err := expand(strings.TrimPrefix(member, "@"))
+				if err != nil {
+					return nil, err
+				}
+				members = append(members, children...)
+			} else {
+				members = append(members, member)
+			}
+		}
+		delete(visiting, name)
+		resolved[name] = uniqueStrings(members)
+		return resolved[name], nil
+	}
+	for i := range m.Groups {
+		members, err := expand(m.Groups[i].Name)
+		if err != nil {
+			return OperationPlan{}, err
+		}
+		m.Groups[i].Members = members
+	}
+	op := operationPlan("upgrade-groups", "Expand nested groups into fixed presets")
+	op.Scopes = []OperationScope{{GroupsBefore: &before, GroupsAfter: &m}}
+	return op, nil
+}
+
+// CreateGroup creates a preset in the personal library.
 func (s *Service) CreateGroup(name string, members []string) (InstallGroup, error) {
-	if !packageNamePattern.MatchString(name) {
-		return InstallGroup{}, fmt.Errorf("invalid group name %q", name)
-	}
-	if len(members) == 0 {
-		return InstallGroup{}, fmt.Errorf("provide at least one skill or @group member")
-	}
-	for _, member := range members {
-		if err := validatePackageRequest(member); err != nil {
-			return InstallGroup{}, fmt.Errorf("invalid group member %q: %w", member, err)
-		}
-	}
-	unlock, err := s.globalLock()
+	p, err := s.PreviewOperation(OperationRequest{Action: "group-create", Arguments: append([]string{name}, members...)})
 	if err != nil {
 		return InstallGroup{}, err
 	}
-	defer unlock()
-	m, err := s.loadGroups()
-	if err != nil {
+	if err = s.ApplyOperation(p); err != nil {
 		return InstallGroup{}, err
 	}
-	for _, group := range m.Groups {
+	for _, group := range p.Scopes[0].GroupsAfter.Groups {
 		if group.Name == name {
-			return InstallGroup{}, fmt.Errorf("group %q already exists", name)
+			return group, nil
 		}
 	}
-	knownGroups := map[string]bool{}
-	for _, group := range m.Groups {
-		knownGroups[group.Name] = true
-	}
-	global, err := New(Config{Home: s.Config.Home, DataHome: s.Config.DataHome, ConfigHome: s.Config.ConfigHome})
-	if err != nil {
-		return InstallGroup{}, err
-	}
-	library, err := global.load()
-	if err != nil {
-		return InstallGroup{}, err
-	}
-	knownSkills := map[string]bool{}
-	for _, record := range library.Records {
-		knownSkills[record.Name] = true
-	}
-	for _, member := range members {
-		if strings.HasPrefix(member, "@") {
-			dependency := strings.TrimPrefix(member, "@")
-			if dependency == name {
-				return InstallGroup{}, fmt.Errorf("group %q cannot contain itself", name)
-			}
-			if !knownGroups[dependency] {
-				return InstallGroup{}, fmt.Errorf("group %q was not found", dependency)
-			}
-		} else if !knownSkills[member] {
-			return InstallGroup{}, fmt.Errorf("skill %q is not in the central library; adopt it first", member)
-		}
-	}
-	group := InstallGroup{Name: name, Members: uniqueStrings(members)}
-	m.Groups = append(m.Groups, group)
-	sort.Slice(m.Groups, func(i, j int) bool { return m.Groups[i].Name < m.Groups[j].Name })
-	if err = atomicJSON(filepath.Join(s.centralStore(), "groups.json"), m); err != nil {
-		return InstallGroup{}, err
-	}
-	return group, nil
+	return InstallGroup{}, fmt.Errorf("created group is missing")
 }
 
-// DeleteGroup removes a group definition. Existing project manifests retain
-// their resolved skill pins until their next sync.
+// DeleteGroup changes the preset definition without altering saved placements.
 func (s *Service) DeleteGroup(name string) error {
-	unlock, err := s.globalLock()
+	p, err := s.PreviewOperation(OperationRequest{Action: "group-delete", Arguments: []string{name}})
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	m, err := s.loadGroups()
-	if err != nil {
-		return err
-	}
-	found := false
-	groups := m.Groups[:0]
-	for _, group := range m.Groups {
-		if group.Name == name {
-			found = true
-			continue
-		}
-		groups = append(groups, group)
-	}
-	if !found {
-		return fmt.Errorf("group %q was not found", name)
-	}
-	m.Groups = groups
-	return atomicJSON(filepath.Join(s.centralStore(), "groups.json"), m)
+	return s.ApplyOperation(p)
 }
 
-func (s *Service) globalLock() (func(), error) {
-	global, err := New(Config{Home: s.Config.Home, DataHome: s.Config.DataHome, ConfigHome: s.Config.ConfigHome})
-	if err != nil {
-		return nil, err
-	}
-	return global.lock()
-}
-
-// PreviewPackages resolves add, remove, or sync against the central library.
 func (s *Service) PreviewPackages(action string, arguments []string) (PackagePlan, error) {
+	return s.previewPackages(action, arguments, nil, false)
+}
+
+func (s *Service) previewPackages(action string, arguments []string, additions []Record, allowRemoteAdd bool) (PackagePlan, error) {
 	if s.Config.Project == "" {
 		return PackagePlan{}, fmt.Errorf("package installation requires a project")
 	}
-	if s.hasPending() {
+	if s.hasPending() && !(allowRemoteAdd && s.remoteAddOnlyPending()) {
 		return PackagePlan{}, fmt.Errorf("an interrupted operation needs recovery; run doctor --recover")
 	}
 	before, err := s.loadPackages()
@@ -273,7 +328,11 @@ func (s *Service) PreviewPackages(action string, arguments []string) (PackagePla
 		if len(arguments) == 0 {
 			return PackagePlan{}, fmt.Errorf("provide at least one skill or @group")
 		}
-		for _, argument := range arguments {
+		expanded, expandErr := s.expandPackageRequests(arguments)
+		if expandErr != nil {
+			return PackagePlan{}, expandErr
+		}
+		for _, argument := range expanded {
 			if err = validatePackageRequest(argument); err != nil {
 				return PackagePlan{}, fmt.Errorf("invalid package request %q: %w", argument, err)
 			}
@@ -286,6 +345,9 @@ func (s *Service) PreviewPackages(action string, arguments []string) (PackagePla
 			return PackagePlan{}, fmt.Errorf("provide at least one installed skill or @group")
 		}
 		for _, argument := range arguments {
+			if strings.HasPrefix(argument, "@") {
+				return PackagePlan{}, fmt.Errorf("groups are presets; remove their skills by name")
+			}
 			if !contains(requests, argument) {
 				return PackagePlan{}, fmt.Errorf("%q is not a direct project request", argument)
 			}
@@ -298,7 +360,7 @@ func (s *Service) PreviewPackages(action string, arguments []string) (PackagePla
 	default:
 		return PackagePlan{}, fmt.Errorf("unknown package action %q", action)
 	}
-	after, err := s.resolvePackages(requests)
+	after, err := s.resolvePackages(requests, additions)
 	if err != nil {
 		return PackagePlan{}, err
 	}
@@ -332,7 +394,54 @@ func (s *Service) PreviewPackages(action string, arguments []string) (PackagePla
 	return plan, nil
 }
 
-func (s *Service) resolvePackages(requests []string) (PackageManifest, error) {
+// expandPackageRequests resolves groups at the moment they are used. Old group
+// definitions may still contain nested groups, so expansion remains recursive.
+func (s *Service) expandPackageRequests(arguments []string) ([]string, error) {
+	manifest, err := s.loadGroups()
+	if err != nil {
+		return nil, err
+	}
+	groups := make(map[string]InstallGroup, len(manifest.Groups))
+	for _, group := range manifest.Groups {
+		groups[group.Name] = group
+	}
+	var result []string
+	visiting := map[string]bool{}
+	var expand func(string) error
+	expand = func(value string) error {
+		if err := validatePackageRequest(value); err != nil {
+			return err
+		}
+		if !strings.HasPrefix(value, "@") {
+			result = append(result, value)
+			return nil
+		}
+		name := strings.TrimPrefix(value, "@")
+		group, ok := groups[name]
+		if !ok {
+			return fmt.Errorf("group %q was not found", name)
+		}
+		if visiting[name] {
+			return fmt.Errorf("group dependency cycle at %q", name)
+		}
+		visiting[name] = true
+		defer delete(visiting, name)
+		for _, member := range group.Members {
+			if err := expand(member); err != nil {
+				return fmt.Errorf("group %q: %w", name, err)
+			}
+		}
+		return nil
+	}
+	for _, argument := range arguments {
+		if err := expand(argument); err != nil {
+			return nil, err
+		}
+	}
+	return uniqueStrings(result), nil
+}
+
+func (s *Service) resolvePackages(requests []string, additions []Record) (PackageManifest, error) {
 	global, err := New(Config{Home: s.Config.Home, DataHome: s.Config.DataHome, ConfigHome: s.Config.ConfigHome})
 	if err != nil {
 		return PackageManifest{}, err
@@ -343,6 +452,15 @@ func (s *Service) resolvePackages(requests []string) (PackageManifest, error) {
 	}
 	byName := map[string]Record{}
 	for _, record := range library.Records {
+		if previous, ok := byName[record.Name]; ok {
+			return PackageManifest{}, fmt.Errorf("library name conflict for %s between %s and %s; resolve the duplicate library records before syncing", record.Name, previous.Library, record.Library)
+		}
+		byName[record.Name] = record
+	}
+	for _, record := range additions {
+		if previous, ok := byName[record.Name]; ok && previous.ID != record.ID {
+			return PackageManifest{}, fmt.Errorf("library name conflict for %s between %s and %s", record.Name, previous.Library, record.Library)
+		}
 		byName[record.Name] = record
 	}
 	groupsManifest, err := s.loadGroups()
@@ -379,9 +497,11 @@ func (s *Service) resolvePackages(requests []string) (PackageManifest, error) {
 		if !ok {
 			return fmt.Errorf("skill %q is not in the central library; adopt it first", request)
 		}
-		info, statErr := os.Lstat(record.Library)
-		if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("central package is unavailable: %s", record.Library)
+		if !containsRecord(additions, record.ID) {
+			info, statErr := os.Lstat(record.Library)
+			if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("central package is unavailable: %s", record.Library)
+			}
 		}
 		resolved[record.Name] = PackageRef{ID: record.ID, Name: record.Name}
 		return nil
@@ -397,6 +517,15 @@ func (s *Service) resolvePackages(requests []string) (PackageManifest, error) {
 	}
 	sort.Slice(result.Skills, func(i, j int) bool { return result.Skills[i].Name < result.Skills[j].Name })
 	return result, nil
+}
+
+func containsRecord(records []Record, id string) bool {
+	for _, record := range records {
+		if record.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) centralLibrary(skill PackageRef) string {
@@ -424,6 +553,24 @@ func validatePackageLinks(plan PackagePlan) error {
 
 // ApplyPackages journals the complete project reconciliation before changing links.
 func (s *Service) ApplyPackages(plan PackagePlan) error {
+	return s.applyPackages(plan, false)
+}
+
+func (s *Service) applyPackages(plan PackagePlan, allowRemoteAdd bool) error {
+	if !allowRemoteAdd {
+		fresh, err := s.PreviewPackages(plan.Action, plan.Arguments)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(fresh, plan) {
+			return fmt.Errorf("package state changed since preview; review a fresh plan")
+		}
+		op, err := s.operationFromPackages(plan)
+		if err != nil {
+			return err
+		}
+		return s.ApplyOperation(op)
+	}
 	global, err := New(Config{Home: s.Config.Home, DataHome: s.Config.DataHome, ConfigHome: s.Config.ConfigHome})
 	if err != nil {
 		return err
@@ -433,7 +580,7 @@ func (s *Service) ApplyPackages(plan PackagePlan) error {
 		return err
 	}
 	defer unlock()
-	fresh, err := s.PreviewPackages(plan.Action, plan.Arguments)
+	fresh, err := s.previewPackages(plan.Action, plan.Arguments, nil, allowRemoteAdd)
 	if err != nil {
 		return err
 	}
@@ -506,6 +653,9 @@ func (s *Service) finishPackages(plan PackagePlan) error {
 		if err = atomicJSON(s.packageManifestPath(), plan.After); err != nil {
 			return fmt.Errorf("package manifest save interrupted: %w; run doctor --recover", err)
 		}
+	}
+	if err = s.registerPackages(plan.After); err != nil {
+		return fmt.Errorf("project registry update interrupted: %w; run doctor --recover", err)
 	}
 	if err = os.Remove(filepath.Join(s.Store, "packages-journal.json")); err != nil {
 		return err

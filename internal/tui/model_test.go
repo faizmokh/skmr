@@ -96,6 +96,78 @@ func TestRemoteImportMenu(t *testing.T) {
 		t.Fatal("import menu did not close")
 	}
 }
+
+func TestRemoteAddStaysInTUIThroughSelection(t *testing.T) {
+	m := model(t)
+	m, _ = key(m, "I")
+	m, _ = key(m, "p")
+	if m.remoteStep != "url" {
+		t.Fatal("URL input did not open")
+	}
+	m, _ = key(m, "https://skills.sh/example/repo")
+	if !strings.Contains(m.View(), "https://skills.sh/example/repo") {
+		t.Fatal("URL is not visible")
+	}
+	m, cmd := key(m, "enter")
+	if cmd == nil || !m.busy {
+		t.Fatal("URL did not start discovery")
+	}
+	next, cmd := m.Update(remoteFoundMsg{url: "https://skills.sh/example/repo", candidates: []manager.RemoteCandidate{{Name: "one"}, {Name: "two"}}})
+	m = next.(Model)
+	if cmd != nil || m.remoteStep != "candidates" || !strings.Contains(m.View(), "Choose skills") {
+		t.Fatal("candidate picker did not open")
+	}
+	m, _ = key(m, " ")
+	m, cmd = key(m, "enter")
+	if cmd == nil || !m.busy || !m.remoteSelected["one"] {
+		t.Fatal("selection did not prepare an in-app preview")
+	}
+}
+
+func TestGroupPresetMenuCreatesAndLists(t *testing.T) {
+	m := model(t)
+	alpha, _ := m.selected()
+	adopt, err := m.service.Preview("adopt", alpha.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.service.Apply(adopt); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := m.Update(m.load()())
+	m = next.(Model)
+	m, cmd := key(m, "G")
+	if cmd == nil || !m.groupMenu {
+		t.Fatal("group menu did not open")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	m, _ = key(m, "c")
+	m, _ = key(m, "starter alpha")
+	if !strings.Contains(m.View(), "starter alpha") {
+		t.Fatal("group input is not visible")
+	}
+	m, cmd = key(m, "enter")
+	if cmd == nil {
+		t.Fatal("group create did not run")
+	}
+	next, cmd = m.Update(cmd())
+	m = next.(Model)
+	if m.pending == nil || m.pending.Action != "group-create" {
+		t.Fatal("group create review is missing")
+	}
+	m, cmd = key(m, "y")
+	next, cmd = m.Update(cmd())
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("group list was not reloaded")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(m.groupItems) != 1 || m.groupItems[0].Name != "starter" {
+		t.Fatalf("group was not created: %+v", m.groupItems)
+	}
+}
 func TestConfirmCancelAndApply(t *testing.T) {
 	m := model(t)
 	m, cmd := actionKey(m, "a")
@@ -104,7 +176,7 @@ func TestConfirmCancelAndApply(t *testing.T) {
 	if m.pending == nil {
 		t.Fatal("adoption skipped preview")
 	}
-	original := m.pending.Record.Original
+	original := m.pending.Content[0].From
 	m, _ = key(m, "n")
 	st, e := os.Lstat(original)
 	if e != nil || !st.IsDir() {
@@ -169,40 +241,13 @@ func TestSpaceTogglesManagedSkill(t *testing.T) {
 	}
 }
 
-func TestMovePromptAppliesAndOpensDestination(t *testing.T) {
+func TestLibrarySkillActionsDoNotOfferIndependentCopies(t *testing.T) {
 	m := adoptSelected(t, model(t))
-	project := filepath.Join(m.service.Config.Home, "destination")
-	if err := os.MkdirAll(project, 0755); err != nil {
-		t.Fatal(err)
-	}
-	m, _ = actionKey(m, "m")
-	if m.transferAction != "move" {
-		t.Fatal("move prompt did not open")
-	}
-	cancelled, _ := key(m, "esc")
-	if cancelled.transferAction != "" {
-		t.Fatal("move prompt did not cancel")
-	}
-	m = cancelled
-	m, _ = actionKey(m, "m")
-	m, _ = key(m, project)
-	m, cmd := key(m, "enter")
-	if cmd == nil {
-		t.Fatal("move preview did not start")
-	}
-	next, _ := m.Update(cmd())
-	m = next.(Model)
-	if m.pendingTransfer == nil {
-		t.Fatal("move preview not shown")
-	}
-	m, cmd = key(m, "y")
-	next, cmd = m.Update(cmd())
-	m = next.(Model)
-	next, _ = m.Update(cmd())
-	m = next.(Model)
 	selected, _ := m.selected()
-	if m.service.Config.Project != project || !selected.Managed || selected.OwnerProject != project {
-		t.Fatalf("destination did not open with moved skill selected: %+v", selected)
+	for _, action := range actionsForSkill(selected) {
+		if action.event == "m" || action.event == "p" {
+			t.Fatalf("independent copy action remains: %+v", action)
+		}
 	}
 }
 func TestReadOnlyAndResize(t *testing.T) {

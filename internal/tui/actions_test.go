@@ -1,13 +1,124 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/faizmokh/skmr/internal/manager"
 	"github.com/faizmokh/skmr/internal/skills"
 )
+
+func TestInstalledSkillCanBeRemovedFromProject(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	global, err := manager.New(manager.Config{Home: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".agents", "skills", "sample")
+	if err = os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("---\nname: sample\ndescription: Test\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	adopt, err := global.Preview("adopt", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = global.Apply(adopt); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(home, "project")
+	if err = os.MkdirAll(projectPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	project, err := manager.New(manager.Config{Home: home, Project: projectPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add, err := project.PreviewPackages("add", []string{"sample"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = project.ApplyPackages(add); err != nil {
+		t.Fatal(err)
+	}
+	m := New(project)
+	next, _ := m.Update(m.Init()())
+	m = next.(Model)
+	item, ok := m.selected()
+	if !ok || !item.Installed {
+		t.Fatalf("installed skill not selected: %+v", item)
+	}
+	m, cmd := actionKey(m, "Z")
+	if cmd == nil {
+		t.Fatal("project removal did not prepare a plan")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.pending == nil || m.pending.Action != "remove" {
+		t.Fatal("project removal review missing")
+	}
+	m, cmd = key(m, "y")
+	next, load := m.Update(cmd())
+	m = next.(Model)
+	next, _ = m.Update(load())
+	m = next.(Model)
+	if _, err = os.Lstat(filepath.Join(project.Shared(), "sample")); !os.IsNotExist(err) {
+		t.Fatal("project placement still exists", err)
+	}
+}
+
+func TestDeleteActionReviewsAndApplies(t *testing.T) {
+	m := adoptSelected(t, model(t))
+	selected, ok := m.selected()
+	if !ok {
+		t.Fatal("no selected skill")
+	}
+	disable, err := m.service.Preview("disable", selected.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.service.Apply(disable); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := m.Update(m.load()())
+	m = next.(Model)
+	m, cmd := actionKey(m, "D")
+	if cmd == nil || !m.busy {
+		t.Fatal("delete action did not prepare preview")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.pending == nil || !strings.Contains(ansi.Strip(m.View()), "Permanently delete") {
+		t.Fatal("deletion review was not shown")
+	}
+	m, _ = key(m, "n")
+	if m.pending != nil {
+		t.Fatal("cancel retained deletion")
+	}
+	if _, err := os.Lstat(selected.Path); err != nil {
+		t.Fatal("cancel removed skill", err)
+	}
+	m, cmd = actionKey(m, "D")
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	m, cmd = key(m, "y")
+	next, load := m.Update(cmd())
+	m = next.(Model)
+	next, _ = m.Update(load())
+	m = next.(Model)
+	if _, err := os.Lstat(selected.Path); !os.IsNotExist(err) || m.pending != nil {
+		t.Fatal("confirmed deletion did not finish", err)
+	}
+}
 
 func TestSkillShortcutsRequireActions(t *testing.T) {
 	for _, pane := range []paneMode{paneList, paneDetails} {
@@ -16,9 +127,9 @@ func TestSkillShortcutsRequireActions(t *testing.T) {
 			state.ID, state.Name, state.Path = m.result.Skills[0].ID, "alpha", m.result.Skills[0].Path
 			m.result.Skills[0] = state
 			m.width, m.height, m.pane = 60, 18, pane
-			for _, shortcut := range []string{"i", "v", "o", "a", "c", "m", "p", "r", "e", "d", " "} {
+			for _, shortcut := range []string{"i", "v", "o", "a", "c", "m", "p", "r", "e", "d", "D", " "} {
 				next, cmd := key(m, shortcut)
-				if cmd != nil || next.pane != pane || next.busy || next.pending != nil || next.transferAction != "" || next.service != m.service {
+				if cmd != nil || next.pane != pane || next.busy || next.pending != nil || next.service != m.service {
 					t.Fatalf("shortcut %q ran outside Actions for %+v in pane %v", shortcut, state, pane)
 				}
 				if containsShortcut(m.shortcuts(), shortcut) {
@@ -51,9 +162,9 @@ func TestActionsReadOnlyAndDivergentAvailability(t *testing.T) {
 	m := model(t)
 	m.result.Skills[0].ReadOnly = true
 	m, _ = key(m, "x")
-	for _, shortcut := range []string{"a", "c", "e", "d", " ", "m", "p", "r", "o", "v"} {
+	for _, shortcut := range []string{"a", "c", "e", "d", "D", " ", "m", "p", "r", "o", "v"} {
 		next, cmd := key(m, shortcut)
-		if cmd != nil || next.pane != paneActions || next.busy || next.transferAction != "" {
+		if cmd != nil || next.pane != paneActions || next.busy {
 			t.Fatalf("unavailable action %q ran", shortcut)
 		}
 	}

@@ -30,6 +30,7 @@ type Skill struct {
 	Installed     bool     `json:"installed,omitempty"`
 	Remote        bool     `json:"remote,omitempty"`
 	SourceURL     string   `json:"source_url,omitempty"`
+	SourcePath    string   `json:"source_path,omitempty"`
 	Enabled       bool     `json:"enabled"`
 	Inherited     bool     `json:"inherited"`
 	ReadOnly      bool     `json:"read_only"`

@@ -43,7 +43,11 @@ func (p Plan) String() string {
 	r := p.Record
 	var lines []string
 	if p.Action == "resolve" {
-		for _, origin := range r.Origins {
+		origins := r.Origins
+		if r.MigratedFrom != nil && len(r.MigratedFrom.Origins) > 0 {
+			origins = r.MigratedFrom.Origins
+		}
+		for _, origin := range origins {
 			if origin.Canonical {
 				lines = append(lines, "Keep:    "+origin.Path)
 			} else {
@@ -176,23 +180,35 @@ func (s *Service) preview(action, arg string) (Plan, error) {
 		}
 	}
 	if action == "restore" {
-		if r.Remote != nil {
-			return p, nil
+		if r.Remote != nil || r.ImportedFrom != "" {
+			return p, fmt.Errorf("imported skill has no adopted origin; remove its placements, then delete it")
 		}
-		for _, origin := range r.Origins {
+		dependencies, dependencyErr := s.deletionDependencies(r)
+		if dependencyErr != nil {
+			return p, dependencyErr
+		}
+		if len(dependencies) > 0 {
+			return p, fmt.Errorf("remove placements before returning %s to its origin: %s", r.Name, strings.Join(dependencies, ", "))
+		}
+		origins := r.Origins
+		if r.MigratedFrom != nil && len(r.MigratedFrom.Origins) > 0 {
+			origins = r.MigratedFrom.Origins
+		}
+		for _, origin := range origins {
 			source := origin.Backup
+			destination := origin.Path
 			if origin.Canonical {
 				source = r.Library
+				if r.MigratedFrom != nil {
+					destination = r.MigratedFrom.Path
+				}
 			}
-			if err = sameDevice(source, origin.Path); err != nil {
-				return p, err
-			}
-			planned, planErr := newMovePlan(source, origin.Path)
+			planned, planErr := newMovePlan(source, destination)
 			if planErr != nil {
 				return p, planErr
 			}
-			if !absent(origin.Path) && !owned(origin.Path, r.Library) {
-				return p, fmt.Errorf("restore destination already exists: %s", origin.Path)
+			if !absent(destination) && !owned(destination, r.Library) {
+				return p, fmt.Errorf("restore destination already exists: %s", destination)
 			}
 			p.Moves = append(p.Moves, planned)
 			if origin.Canonical {
@@ -206,11 +222,6 @@ func (s *Service) preview(action, arg string) (Plan, error) {
 // Apply verifies that a reviewed plan is still current, then journals before any
 // content mutation. Interrupted operations remain explicit until Recover is called.
 func (s *Service) Apply(plan Plan) error {
-	unlock, err := s.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
 	arg := plan.Record.ID
 	if plan.Action == "adopt" {
 		arg = plan.Record.Original
@@ -222,13 +233,26 @@ func (s *Service) Apply(plan Plan) error {
 	if !reflect.DeepEqual(fresh, plan) {
 		return fmt.Errorf("skill state changed since preview; review a fresh plan")
 	}
-	if err = atomicJSON(filepath.Join(s.Store, "journal.json"), plan); err != nil {
+	op, err := s.operationFromPlan(plan)
+	if err != nil {
 		return err
 	}
-	return s.finish(plan)
+	return s.ApplyOperation(op)
 }
 
 func (s *Service) Recover() error {
+	if !absent(s.operationPath()) {
+		return s.recoverOperation()
+	}
+	if !absent(s.upgradePath()) {
+		return s.recoverProjectUpgrade()
+	}
+	if !absent(s.deletionJournalPath()) {
+		return s.recoverDelete()
+	}
+	if !absent(s.remoteAddJournalPath()) {
+		return s.recoverRemoteAdd()
+	}
 	if !absent(filepath.Join(s.Store, "remote-journal.json")) {
 		return s.recoverRemote()
 	}
@@ -308,7 +332,7 @@ func upgradeLegacyPlan(p *Plan) {
 }
 
 func resultManifest(p Plan) (Manifest, error) {
-	m := Manifest{Version: Version, Records: append([]Record{}, p.Before.Records...)}
+	m := cloneManifest(p.Before)
 	switch p.Action {
 	case "adopt":
 		m.Records = append(m.Records, p.Record)
@@ -338,6 +362,15 @@ func resultManifest(p Plan) (Manifest, error) {
 		}
 	default:
 		return m, fmt.Errorf("unknown journal action %q", p.Action)
+	}
+	for _, move := range p.Moves {
+		if p.Action == "restore" {
+			if !contains(m.Returned, move.To) {
+				m.Returned = append(m.Returned, move.To)
+			}
+		} else if p.Action == "adopt" || p.Action == "resolve" {
+			forgetReturned(&m, move.From)
+		}
 	}
 	return m, nil
 }

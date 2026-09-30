@@ -35,7 +35,7 @@ func TestGroupNavigationAndActions(t *testing.T) {
 	}
 	for _, k := range []string{"a", "c", "e", "d", " ", "m", "p", "r"} {
 		next, cmd := key(m, k)
-		if cmd != nil || next.pending != nil || next.transferAction != "" {
+		if cmd != nil || next.pending != nil {
 			t.Fatalf("group action %q", k)
 		}
 	}

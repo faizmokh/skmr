@@ -53,10 +53,10 @@ func (m Model) View() string {
 		return "skmr\nTerminal too small (minimum 30 × 10).\nq quit"
 	}
 	header := m.header(w)
-	if m.pendingBatch != nil || m.migration != nil {
+	if m.migration != nil {
 		bodyHeight := max(6, h-3)
 		body := ""
-		if m.pendingBatch != nil {
+		if m.pending != nil && m.migration != nil {
 			body = m.batchReviewView(w, bodyHeight)
 		} else {
 			body = m.migrationView(w, bodyHeight)
@@ -66,12 +66,12 @@ func (m Model) View() string {
 	toolbar := m.toolbar(w)
 	bodyHeight := m.bodyHeight()
 	var body string
-	if m.pending != nil || m.pendingTransfer != nil {
+	if m.pending != nil {
 		body = m.reviewView(w, bodyHeight)
+	} else if m.groupMenu {
+		body = m.groupPane(w, bodyHeight)
 	} else if m.remoteMenu {
-		body = frame("Import internet skills", fillWrapped([]string{"", accentStyle.Render("p  Paste GitHub or skills.sh URL"), "", accentStyle.Render("s  Search skills.sh"), "", mutedStyle.Render("Esc  Return to library")}, w-2), w, bodyHeight, true)
-	} else if m.transferAction != "" {
-		body = m.transferView(w, bodyHeight)
+		body = m.remotePane(w, bodyHeight)
 	} else if m.pane == paneInstructions {
 		body = m.instructionsPane(w, bodyHeight)
 	} else if m.pane == paneProblems {
@@ -404,7 +404,8 @@ func (m Model) helpContent(width int) []string {
 		accentStyle.Render("Browse"),
 		"  /  search       f or 1–4  change view",
 		"  Tab  scope      R  refresh",
-		"  I  import from internet",
+		"  I  add path or URL     G  group presets",
+		"  S  sync project placements",
 		"  !  problems",
 		"",
 		accentStyle.Render("Act"),
@@ -557,13 +558,12 @@ func scrollRange(total, pageSize, offset int) scrollMetadata {
 func (m Model) reviewView(width, height int) string {
 	title := "Confirm"
 	preview := ""
-	if m.pendingTransfer != nil {
-		title += " " + m.pendingTransfer.plan.Action
-		preview = m.pendingTransfer.plan.String()
+	if m.pending.Action == "delete" {
+		title += " permanent deletion"
 	} else {
 		title += " " + actionLabel(m.pending.Action)
-		preview = m.pending.String()
 	}
+	preview = m.pending.String()
 	lines := []string{
 		warningStyle.Render("Review every filesystem change before applying."),
 		"",
@@ -572,21 +572,64 @@ func (m Model) reviewView(width, height int) string {
 	return scrollFrame(title, lines, width, height, m.offset, true)
 }
 
-func (m Model) transferView(width, height int) string {
-	value := m.transferInput
-	if value == "" {
-		value = "global or /path/to/project"
+func (m Model) remotePane(width, height int) string {
+	lines := []string{""}
+	title := "Add skills"
+	switch m.remoteStep {
+	case "local":
+		lines = append(lines, "Local skill path or library name:", accentStyle.Render(terminal.Safe(m.remoteInput)+"▏"))
+	case "url":
+		lines = append(lines, "GitHub or skills.sh URL:", accentStyle.Render(terminal.Safe(m.remoteInput)+"▏"))
+	case "search":
+		lines = append(lines, "Search skills.sh:", accentStyle.Render(terminal.Safe(m.remoteInput)+"▏"))
+	case "results":
+		title = "Search results"
+		for i, result := range m.remoteResults {
+			prefix := "  "
+			if i == m.remoteCursor {
+				prefix = "> "
+			}
+			lines = append(lines, prefix+terminal.Safe(result.Name)+"  "+terminal.Safe(result.URL))
+		}
+	case "candidates":
+		title = "Choose skills"
+		for i, candidate := range m.remoteChoices {
+			prefix := "  "
+			if i == m.remoteCursor {
+				prefix = "> "
+			}
+			check := "[ ] "
+			if m.remoteSelected[candidate.Name] {
+				check = "[x] "
+			}
+			lines = append(lines, prefix+check+terminal.Safe(candidate.Name))
+		}
+	default:
+		lines = append(lines, accentStyle.Render("l  Local path or library name"), "", accentStyle.Render("p  Paste GitHub or skills.sh URL"), "", accentStyle.Render("s  Search skills.sh"), "", mutedStyle.Render("Esc  Return to library"))
 	}
-	lines := []string{
-		accentStyle.Render("Destination scope"),
-		"",
-		"> " + terminal.Safe(value) + accentStyle.Render("█"),
-		"",
-		mutedStyle.Render("Type global or an existing project directory."),
-		mutedStyle.Render("Enter review  Esc cancel"),
+	return frame(title, fillWrapped(lines, width-2), width, height, true)
+}
+
+func (m Model) groupPane(width, height int) string {
+	lines := []string{""}
+	title := "Group presets"
+	switch m.groupStep {
+	case "create":
+		title = "Create group preset"
+		lines = append(lines, "Name followed by skill names:", accentStyle.Render(terminal.Safe(m.groupInput)+"▏"))
+	default:
+		if len(m.groupItems) == 0 {
+			lines = append(lines, "No presets yet. Press c to create one.")
+		}
+		for i, group := range m.groupItems {
+			prefix := "  "
+			if i == m.groupCursor {
+				prefix = "> "
+			}
+			lines = append(lines, prefix+"@"+terminal.Safe(group.Name)+"  "+terminal.Safe(strings.Join(group.Members, ", ")))
+		}
 	}
-	name := strings.ToUpper(m.transferAction[:1]) + m.transferAction[1:]
-	return frame(name+" skill", fill(lines, width-2, height-2), width, height, true)
+	return frame(title, fillWrapped(lines, width-2), width, height, true)
 }
 
 func actionLabel(action string) string {
@@ -625,7 +668,7 @@ func (m Model) shortcuts() []shortcut {
 	if m.busy {
 		return []shortcut{{"q", "quit", "q", true}}
 	}
-	if m.pendingBatch != nil {
+	if m.pending != nil && m.migration != nil {
 		return []shortcut{{"y", "add skills", "y", true}, {"n", "back", "n", true}, {"PgUp/Dn", "review", "", false}, {"q", "quit", "q", true}}
 	}
 	if m.migration != nil {
@@ -635,14 +678,27 @@ func (m Model) shortcuts() []shortcut {
 		}
 		return []shortcut{{"Space", "select", " ", true}, {"a", "all safe", "a", false}, {"n", "clear", "n", false}, {"Enter", "review", "enter", true}, {"Esc", escapeLabel, "esc", true}, {"q", "quit", "q", true}}
 	}
-	if m.pending != nil || m.pendingTransfer != nil {
+	if m.pending != nil {
 		return []shortcut{{"y", "apply", "y", true}, {"n", "cancel", "n", true}, {"PgUp/Dn", "review", "", false}, {"q", "quit", "q", true}}
 	}
 	if m.remoteMenu {
-		return []shortcut{{"p", "paste URL", "p", true}, {"s", "search", "s", true}, {"Esc", "back", "esc", true}}
+		switch m.remoteStep {
+		case "local", "url", "search":
+			return []shortcut{{"Enter", "continue", "enter", true}, {"Esc", "back", "esc", true}}
+		case "results":
+			return []shortcut{{"↑↓", "choose", "", false}, {"Enter", "open", "enter", true}, {"Esc", "back", "esc", true}}
+		case "candidates":
+			return []shortcut{{"Space", "select", " ", true}, {"Enter", "review", "enter", true}, {"Esc", "back", "esc", true}}
+		}
+		return []shortcut{{"l", "path/name", "l", true}, {"p", "paste URL", "p", true}, {"s", "search", "s", true}, {"Esc", "back", "esc", true}}
 	}
-	if m.transferAction != "" {
-		return []shortcut{{"type", "destination", "", false}, {"Enter", "review", "enter", true}, {"Esc", "cancel", "esc", true}, {"⌫", "delete", "backspace", false}}
+	if m.groupMenu {
+		switch m.groupStep {
+		case "create":
+			return []shortcut{{"Enter", "create", "enter", true}, {"Esc", "back", "esc", true}}
+
+		}
+		return []shortcut{{"↑↓", "choose", "", false}, {"Enter", "add preset", "enter", true}, {"c", "create", "c", true}, {"d", "delete", "d", true}, {"Esc", "back", "esc", true}}
 	}
 	if m.searching {
 		return []shortcut{{"type", "search", "", false}, {"Enter", "keep", "enter", true}, {"Esc", "clear", "esc", true}, {"⌫", "delete", "backspace", false}}
@@ -663,7 +719,10 @@ func (m Model) shortcuts() []shortcut {
 	case paneActions:
 		return []shortcut{{"↑↓", "choose", "", false}, {"Enter", "select", "enter", true}, {"Esc", "back", "esc", true}, {"q", "quit", "q", true}}
 	}
-	out := []shortcut{{"↑↓", "select", "", false}, {"/", "search", "/", false}, {"A", "add skills", "A", false}, {"I", "import", "I", false}}
+	out := []shortcut{{"↑↓", "select", "", false}, {"/", "search", "/", false}, {"A", "adopt", "A", false}, {"I", "add", "I", false}, {"G", "groups", "G", false}}
+	if m.service.Scope() == "project" {
+		out = append(out, shortcut{"S", "sync", "S", false})
+	}
 	if m.pane == paneDetails && m.compact() {
 		out = append(out, shortcut{"Esc", "back", "esc", true})
 	}

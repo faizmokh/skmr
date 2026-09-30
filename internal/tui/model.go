@@ -3,8 +3,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,21 +16,16 @@ type loadedMsg struct {
 	err    error
 }
 type previewMsg struct {
-	plan    manager.Plan
+	plan    manager.OperationPlan
 	err     error
 	confirm bool
-}
-type transferPreviewMsg struct {
-	plan        manager.TransferPlan
-	destination *manager.Service
-	err         error
 }
 type appliedMsg struct {
 	err    error
 	action string
 }
 type batchPreviewMsg struct {
-	plan manager.BatchPlan
+	plan manager.OperationPlan
 	err  error
 }
 type batchAppliedMsg struct {
@@ -42,64 +35,88 @@ type batchAppliedMsg struct {
 	skipped  int
 }
 type setupMarkedMsg struct{ err error }
-type transferAppliedMsg struct {
-	err         error
-	action      string
-	destination *manager.Service
-	id          string
-}
-type pendingTransfer struct {
-	plan        manager.TransferPlan
-	destination *manager.Service
-}
 type contentMsg struct{ id, content string }
-type remoteDoneMsg struct{ err error }
+type remoteFoundMsg struct {
+	candidates []manager.RemoteCandidate
+	url        string
+	err        error
+}
+type remoteSearchMsg struct {
+	results []manager.SearchResult
+	err     error
+}
+type remotePreviewMsg struct {
+	plan manager.OperationPlan
+	err  error
+}
+type groupsLoadedMsg struct {
+	groups []manager.InstallGroup
+	err    error
+}
 
 type Model struct {
-	service         *manager.Service
-	project         string
-	result          skills.Result
-	cursor          int
-	expanded        map[string]bool
-	query           string
-	searching       bool
-	filter          skillView
-	width, height   int
-	content         string
-	offset          int
-	pending         *manager.Plan
-	pendingBatch    *manager.BatchPlan
-	pendingTransfer *pendingTransfer
-	migration       *migrationState
-	transferAction  string
-	transferInput   string
-	transferItem    string
-	selectID        string
-	selectAction    string
-	pane            paneMode
-	returnPane      paneMode
-	actionCursor    int
-	diff            copyDiff
-	diffTarget      int
-	diffHorizontal  int
-	diffLoading     bool
-	inventory       inventoryPhase
-	busy            bool
-	remoteMenu      bool
-	notice          notice
+	service        *manager.Service
+	project        string
+	result         skills.Result
+	cursor         int
+	expanded       map[string]bool
+	query          string
+	searching      bool
+	filter         skillView
+	width, height  int
+	content        string
+	offset         int
+	pending        *manager.OperationPlan
+	migration      *migrationState
+	selectID       string
+	selectAction   string
+	pane           paneMode
+	returnPane     paneMode
+	actionCursor   int
+	diff           copyDiff
+	diffTarget     int
+	diffHorizontal int
+	diffLoading    bool
+	inventory      inventoryPhase
+	busy           bool
+	remoteMenu     bool
+	remoteStep     string
+	remoteInput    string
+	remoteURL      string
+	remoteCursor   int
+	remoteResults  []manager.SearchResult
+	remoteChoices  []manager.RemoteCandidate
+	remoteSelected map[string]bool
+	groupMenu      bool
+	groupStep      string
+	groupInput     string
+	groupCursor    int
+	groupItems     []manager.InstallGroup
+	autoAdopt      bool
+	notice         notice
 }
 
 func New(s *manager.Service) Model {
 	return Model{service: s, project: s.Config.Project, width: 100, height: 30, inventory: inventoryLoading, busy: true, notice: notice{text: "Reading skill directories…", level: noticeProgress}}
 }
 func Run(s *manager.Service) error {
-	_, err := tea.NewProgram(New(s), tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+	m := New(s)
+	m.autoAdopt = true
+	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	return err
 }
 func (m Model) Init() tea.Cmd { return m.load() }
 func (m Model) load() tea.Cmd {
 	s := m.service
-	return func() tea.Msg { r, e := s.List(); return loadedMsg{r, e} }
+	return func() tea.Msg {
+		if m.autoAdopt {
+			if err := s.AutoAdopt(); err != nil {
+				return loadedMsg{err: err}
+			}
+		}
+		r, e := s.List()
+		return loadedMsg{r, e}
+	}
 }
 func (m Model) items() []skills.Skill {
 	out := []skills.Skill{}
@@ -154,8 +171,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.inventory = inventoryReady
 		m.pending = nil
-		m.pendingBatch = nil
-		m.pendingTransfer = nil
 		if msg.err != nil {
 			m.setNotice(noticeError, failureNotice("load", msg.err))
 			return m, nil
@@ -187,15 +202,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if item, ok := m.selected(); ok && item.ID == msg.id {
 			m.content = msg.content
 		}
-	case remoteDoneMsg:
-		m.remoteMenu = false
+	case remoteSearchMsg:
+		m.busy = false
 		if msg.err != nil {
-			m.setNotice(noticeError, "Remote command failed: "+sanitizeNotice(msg.err))
-		} else {
-			m.setNotice(noticeSuccess, "Remote command finished. Skills may need a reload.")
+			m.setNotice(noticeError, failureNotice("search", msg.err))
+			return m, nil
 		}
-		m.busy = true
-		return m, m.load()
+		m.remoteResults = msg.results
+		m.remoteCursor = 0
+		m.remoteStep = "results"
+		if len(msg.results) == 0 {
+			m.setNotice(noticeInfo, "No skills found. Enter another search.")
+			m.remoteStep = "search"
+		}
+		return m, nil
+	case remoteFoundMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.setNotice(noticeError, failureNotice("discover", msg.err))
+			return m, nil
+		}
+		m.remoteURL = msg.url
+		m.remoteChoices = msg.candidates
+		m.remoteSelected = map[string]bool{}
+		m.remoteCursor = 0
+		m.remoteStep = "candidates"
+		if len(msg.candidates) == 1 {
+			m.remoteSelected[msg.candidates[0].Name] = true
+			return m.prepareRemoteSelection()
+		}
+		return m, nil
+	case remotePreviewMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.setNotice(noticeError, failureNotice("preview", msg.err))
+			return m, nil
+		}
+		m.pending = &msg.plan
+		m.remoteMenu = false
+		m.remoteStep = ""
+		m.openPane(paneReview)
+		return m, nil
+	case groupsLoadedMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.setNotice(noticeError, failureNotice("groups", msg.err))
+			return m, nil
+		}
+		m.groupItems = msg.groups
+		m.groupCursor = min(m.groupCursor, max(0, len(msg.groups)-1))
+		return m, nil
 	case diffMsg:
 		source, target, ok := m.selectedDiffTarget()
 		if m.pane != paneDiff || !ok || source.ID != msg.sourceID || target.ID != msg.targetID {
@@ -217,25 +273,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.confirm {
+			m.groupMenu = false
 			m.openPane(paneReview)
 			m.pending = &msg.plan
 			return m, nil
 		}
 		m.busy = true
 		s := m.service
-		return m, func() tea.Msg { return appliedMsg{s.Apply(msg.plan), msg.plan.Action} }
+		return m, func() tea.Msg { return appliedMsg{s.ApplyOperation(msg.plan), msg.plan.Action} }
 	case batchPreviewMsg:
 		m.busy = false
 		if msg.err != nil {
 			m.setNotice(noticeError, failureNotice("batch-preview", msg.err))
 			return m, nil
 		}
-		m.pendingBatch = &msg.plan
+		m.pending = &msg.plan
 		m.offset = 0
 		return m, nil
 	case batchAppliedMsg:
 		m.busy = false
-		m.pendingBatch = nil
 		if msg.applyErr != nil {
 			m.setNotice(noticeError, failureNotice("batch-apply", msg.applyErr))
 			return m, nil
@@ -258,50 +314,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.migration = nil
 		m.setNotice(noticeInfo, "Setup skipped. Press A to add skills later.")
 		return m, nil
-	case transferPreviewMsg:
-		m.busy = false
-		if msg.err != nil {
-			m.setNotice(noticeError, failureNotice("transfer-preview", msg.err))
-			return m, nil
-		}
-		m.openPane(paneReview)
-		m.pendingTransfer = &pendingTransfer{msg.plan, msg.destination}
-		return m, nil
 	case appliedMsg:
 		m.busy = false
 		m.pending = nil
+		if msg.err == nil && strings.HasPrefix(msg.action, "group-") {
+			m.closePane()
+			m.groupMenu, m.groupStep, m.groupInput = true, "list", ""
+			m.setNotice(noticeSuccess, "Group preset saved.")
+			m.busy = true
+			s := m.service
+			return m, func() tea.Msg { groups, err := s.Groups(); return groupsLoadedMsg{groups, err} }
+		}
 		if msg.err != nil {
 			m.closePane()
 			m.setNotice(noticeError, failureNotice("apply", msg.err))
 		} else {
-			if item, ok := m.selected(); ok {
+			if item, ok := m.selected(); ok && msg.action != "delete" {
 				m.selectID = item.ID
 				m.selectAction = msg.action
 			}
+			if msg.action == "delete" {
+				m.pane = paneList
+				m.returnPane = paneList
+			}
 			m.setNotice(noticeSuccess, successNotice(msg.action))
 		}
-		m.busy = true
-		return m, m.load()
-	case transferAppliedMsg:
-		m.busy = false
-		m.pendingTransfer = nil
-		if msg.err != nil {
-			m.closePane()
-			m.setNotice(noticeError, failureNotice("transfer-apply", msg.err))
-			return m, nil
-		}
-		m.service = msg.destination
-		m.result = skills.Result{}
-		m.content = ""
-		m.cursor = 0
-		m.inventory = inventoryLoading
-		m.selectView(m.filter)
-		if msg.destination.Config.Project != "" {
-			m.project = msg.destination.Config.Project
-		}
-		m.selectID = msg.id
-		m.selectAction = msg.action
-		m.setNotice(noticeSuccess, successNotice(msg.action))
 		m.busy = true
 		return m, m.load()
 	case tea.MouseMsg:
@@ -309,6 +346,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		key := msg.String()
 		if key == "ctrl+c" {
+			if m.pending != nil {
+				m.pending.Discard()
+			}
 			return m, tea.Quit
 		}
 		if m.busy {
@@ -325,21 +365,159 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.remoteMenu {
-			switch key {
-			case "esc", "q":
-				m.remoteMenu = false
+		if m.groupMenu {
+			if key == "esc" || key == "q" {
+				if m.groupStep == "list" {
+					m.groupMenu = false
+				} else {
+					m.groupStep = "list"
+				}
 				return m, nil
-			case "p":
-				m.remoteMenu = false
-				return m.runRemoteCommand("import")
-			case "s":
-				m.remoteMenu = false
-				return m.runRemoteCommand("search")
+			}
+			switch m.groupStep {
+			case "list":
+				switch key {
+				case "j", "down":
+					m.groupCursor = min(m.groupCursor+1, max(0, len(m.groupItems)-1))
+				case "k", "up":
+					m.groupCursor = max(0, m.groupCursor-1)
+				case "c":
+					m.groupStep, m.groupInput = "create", ""
+				case "d":
+					if len(m.groupItems) > 0 {
+						name := m.groupItems[m.groupCursor].Name
+						m.busy = true
+						s := m.service
+						return m, func() tea.Msg {
+							plan, err := s.PreviewOperation(manager.OperationRequest{Action: "group-delete", Arguments: []string{name}})
+							return previewMsg{plan: plan, err: err, confirm: true}
+						}
+					}
+				case "enter":
+					if len(m.groupItems) > 0 {
+						name := m.groupItems[m.groupCursor].Name
+						m.busy = true
+						s := m.service
+						return m, func() tea.Msg {
+							plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: []string{"@" + name}})
+							return previewMsg{plan: plan, err: err, confirm: true}
+						}
+					}
+				}
+			case "create":
+				switch key {
+				case "enter":
+					fields := strings.Fields(m.groupInput)
+					if len(fields) < 2 {
+						m.setNotice(noticeWarning, "Enter a name followed by one or more skills.")
+						return m, nil
+					}
+					m.busy = true
+					s := m.service
+					return m, func() tea.Msg {
+						plan, err := s.PreviewOperation(manager.OperationRequest{Action: "group-create", Arguments: fields})
+						return previewMsg{plan: plan, err: err, confirm: true}
+					}
+				case "backspace":
+					r := []rune(m.groupInput)
+					if len(r) > 0 {
+						m.groupInput = string(r[:len(r)-1])
+					}
+				default:
+					if msg.Type == tea.KeyRunes {
+						m.groupInput += string(msg.Runes)
+					}
+					if msg.Type == tea.KeySpace {
+						m.groupInput += " "
+					}
+				}
+
 			}
 			return m, nil
 		}
-		if m.pending != nil || m.pendingBatch != nil || m.pendingTransfer != nil {
+		if m.remoteMenu {
+			if key == "esc" || key == "q" {
+				if m.remoteStep == "menu" {
+					m.remoteMenu = false
+				} else {
+					m.remoteStep = "menu"
+				}
+				return m, nil
+			}
+			switch m.remoteStep {
+			case "menu":
+				if key == "l" {
+					m.remoteStep, m.remoteInput = "local", ""
+				}
+				if key == "p" {
+					m.remoteStep, m.remoteInput = "url", ""
+				}
+				if key == "s" {
+					m.remoteStep, m.remoteInput = "search", ""
+				}
+			case "local", "url", "search":
+				switch key {
+				case "enter":
+					value := strings.TrimSpace(m.remoteInput)
+					if value == "" {
+						m.setNotice(noticeWarning, "Enter a path, URL, or search query.")
+						return m, nil
+					}
+					m.busy = true
+					if m.remoteStep == "local" {
+						s := m.service
+						return m, func() tea.Msg {
+							plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: []string{value}})
+							return remotePreviewMsg{plan: plan, err: err}
+						}
+					}
+					if m.remoteStep == "url" {
+						return m, m.discoverRemote(value)
+					}
+					return m, func() tea.Msg { results, err := manager.SearchRemote(value); return remoteSearchMsg{results, err} }
+				case "backspace":
+					r := []rune(m.remoteInput)
+					if len(r) > 0 {
+						m.remoteInput = string(r[:len(r)-1])
+					}
+				default:
+					if msg.Type == tea.KeyRunes {
+						m.remoteInput += string(msg.Runes)
+					}
+					if msg.Type == tea.KeySpace {
+						m.remoteInput += " "
+					}
+				}
+			case "results":
+				switch key {
+				case "j", "down":
+					m.remoteCursor = min(m.remoteCursor+1, len(m.remoteResults)-1)
+				case "k", "up":
+					m.remoteCursor = max(0, m.remoteCursor-1)
+				case "enter":
+					if len(m.remoteResults) > 0 {
+						m.busy = true
+						return m, m.discoverRemote(m.remoteResults[m.remoteCursor].URL)
+					}
+				}
+			case "candidates":
+				switch key {
+				case "j", "down":
+					m.remoteCursor = min(m.remoteCursor+1, len(m.remoteChoices)-1)
+				case "k", "up":
+					m.remoteCursor = max(0, m.remoteCursor-1)
+				case " ":
+					if len(m.remoteChoices) > 0 {
+						name := m.remoteChoices[m.remoteCursor].Name
+						m.remoteSelected[name] = !m.remoteSelected[name]
+					}
+				case "enter":
+					return m.prepareRemoteSelection()
+				}
+			}
+			return m, nil
+		}
+		if m.pending != nil {
 			if key == "pgdown" {
 				m.offset += max(1, m.height/3)
 			}
@@ -347,52 +525,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.offset = max(0, m.offset-max(1, m.height/3))
 			}
 			if key == "esc" || key == "n" {
-				if m.pendingBatch != nil {
-					m.pendingBatch = nil
-					m.offset = 0
+				m.pending.Discard()
+				m.pending = nil
+				m.offset = 0
+				if m.migration != nil {
 					m.setNotice(noticeInfo, "Review your skill selection.")
 					return m, nil
 				}
-				m.pending = nil
-				m.pendingTransfer = nil
 				m.closePane()
 				m.setNotice(noticeInfo, "No changes made.")
 			}
 			if key == "q" {
+				m.pending.Discard()
 				return m, tea.Quit
 			}
 			if key == "y" {
+				plan := *m.pending
+				m.pending = nil
 				m.busy = true
-				if m.pendingBatch != nil {
-					plan := *m.pendingBatch
-					m.pendingBatch = nil
-					initial := m.migration != nil && m.migration.initial
-					skipped := 0
-					if m.migration != nil {
-						skipped = m.migration.skippedCount()
-					}
-					s := m.service
+				s := m.service
+				if m.migration != nil {
+					initial, skipped, count := m.migration.initial, m.migration.skippedCount(), m.migration.selectedCount()
 					return m, func() tea.Msg {
-						applyErr := s.ApplyBatch(plan)
+						defer plan.Discard()
+						applyErr := s.ApplyOperation(plan)
 						var setupErr error
 						if applyErr == nil && initial {
 							setupErr = s.MarkSetup("completed")
 						}
-						return batchAppliedMsg{applyErr: applyErr, setupErr: setupErr, count: len(plan.Plans), skipped: skipped}
+						return batchAppliedMsg{applyErr: applyErr, setupErr: setupErr, count: count, skipped: skipped}
 					}
 				}
-				if m.pendingTransfer != nil {
-					p := *m.pendingTransfer
-					m.pendingTransfer = nil
-					s := m.service
-					return m, func() tea.Msg {
-						return transferAppliedMsg{s.ApplyTransfer(p.destination, p.plan), p.plan.Action, p.destination, p.plan.DestinationRecord.ID}
-					}
-				}
-				p := *m.pending
-				m.pending = nil
-				s := m.service
-				return m, func() tea.Msg { return appliedMsg{s.Apply(p), p.Action} }
+				return m, func() tea.Msg { defer plan.Discard(); return appliedMsg{s.ApplyOperation(plan), plan.Action} }
 			}
 			return m, nil
 		}
@@ -430,7 +594,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.busy = true
 				s := m.service
 				return m, func() tea.Msg {
-					plan, err := s.PreviewBatchAdopt(paths)
+					plan, err := s.PreviewOperation(manager.OperationRequest{Action: "adopt-batch", Arguments: paths})
 					return batchPreviewMsg{plan: plan, err: err}
 				}
 			case "esc":
@@ -513,7 +677,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				matched := false
 				for _, action := range actions {
-					if key == action.event || key == strings.ToLower(action.key) || action.key == "Space" && key == " " {
+					if key == action.event || action.key != "D" && key == strings.ToLower(action.key) || action.key == "Space" && key == " " {
 						key = action.event
 						matched = true
 						break
@@ -540,48 +704,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.offset = max(0, m.offset-max(1, m.height/3))
 				return m, nil
 			}
-		}
-		if m.transferAction != "" {
-			switch key {
-			case "esc":
-				m.transferAction, m.transferInput, m.transferItem = "", "", ""
-				m.setNotice(noticeInfo, "No changes made.")
-				return m, nil
-			case "enter":
-				destinationText := strings.TrimSpace(m.transferInput)
-				if destinationText == "" {
-					m.setNotice(noticeWarning, "Enter global or a project directory.")
-					return m, nil
-				}
-				project := destinationText
-				if strings.EqualFold(destinationText, "global") {
-					project = ""
-				}
-				destination, err := manager.New(manager.Config{Home: m.service.Config.Home, DataHome: m.service.Config.DataHome, ConfigHome: m.service.Config.ConfigHome, Project: project})
-				if err != nil {
-					m.setNotice(noticeError, failureNotice("destination", err))
-					return m, nil
-				}
-				action, id, source := m.transferAction, m.transferItem, m.service
-				m.transferAction, m.transferInput, m.transferItem = "", "", ""
-				m.busy = true
-				return m, func() tea.Msg {
-					plan, previewErr := source.PreviewTransfer(action, id, destination)
-					return transferPreviewMsg{plan, destination, previewErr}
-				}
-			case "backspace":
-				runes := []rune(m.transferInput)
-				if len(runes) > 0 {
-					m.transferInput = string(runes[:len(runes)-1])
-				}
-			default:
-				if msg.Type == tea.KeyRunes {
-					m.transferInput += string(msg.Runes)
-				} else if msg.Type == tea.KeySpace {
-					m.transferInput += " "
-				}
-			}
-			return m, nil
 		}
 		if m.searching {
 			switch key {
@@ -634,7 +756,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "home", "g":
 			m.cursor = 0
 			return m, m.selection()
-		case "end", "G":
+		case "end":
 			m.cursor = max(0, len(m.rows())-1)
 			return m, m.selection()
 		case "pgdown", "ctrl+d":
@@ -678,6 +800,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.setNotice(noticeProgress, "Reading skill directories…")
 			return m, m.load()
+		case "S":
+			if m.service.Scope() != "project" {
+				m.setNotice(noticeInfo, "Switch to a project to sync its placements.")
+				return m, nil
+			}
+			s := m.service
+			m.busy = true
+			return m, func() tea.Msg {
+				plan, err := s.PreviewOperation(manager.OperationRequest{Action: "sync"})
+				return previewMsg{plan: plan, err: err, confirm: true}
+			}
 		case "A":
 			m.migration = newMigration(m.result, false)
 			if m.migration == nil {
@@ -688,7 +821,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "I":
 			m.remoteMenu = true
+			m.remoteStep = "menu"
 			return m, nil
+		case "G":
+			m.groupMenu = true
+			m.groupStep = "list"
+			m.busy = true
+			s := m.service
+			return m, func() tea.Msg { groups, err := s.Groups(); return groupsLoadedMsg{groups, err} }
 		case "x":
 			if item, ok := m.selected(); ok && len(actionsForSkill(item)) > 0 {
 				m.actionCursor = 0
@@ -710,18 +850,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // runSkillAction dispatches an available action selected in the Actions pane.
 func (m Model) runSkillAction(key string) (tea.Model, tea.Cmd) {
 	switch key {
+	case "P", "Z":
+		item, ok := m.selected()
+		if !ok || m.service.Config.Project == "" {
+			return m, nil
+		}
+		action := "add"
+		if key == "Z" {
+			if !item.Installed {
+				return m, nil
+			}
+			action = "remove"
+		} else if !item.Inherited || !item.Managed {
+			return m, nil
+		}
+		s := m.service
+		m.busy = true
+		return m, func() tea.Msg {
+			plan, err := s.PreviewOperation(manager.OperationRequest{Action: action, Arguments: []string{item.Name}})
+			return previewMsg{plan: plan, err: err, confirm: true}
+		}
+	case "D":
+		item, ok := m.selected()
+		if !ok || item.ReadOnly || item.Inherited {
+			return m, nil
+		}
+		s := m.service
+		m.busy = true
+		return m, func() tea.Msg {
+			plan, err := s.PreviewOperation(manager.OperationRequest{Action: "delete", Arguments: []string{item.ID}})
+			return previewMsg{plan: plan, err: err, confirm: true}
+		}
 	case "u":
 		item, ok := m.selected()
 		if !ok || !item.Remote || item.Inherited {
 			return m, nil
 		}
-		return m.runRemoteCommand("update", item.ID)
+		return m.prepareRemoteUpdate(item.ID, false)
 	case "U":
 		item, ok := m.selected()
 		if !ok || !item.Remote || item.Inherited {
 			return m, nil
 		}
-		return m.runRemoteCommand("update", item.ID, "--replace")
+		return m.prepareRemoteUpdate(item.ID, true)
 	case "i":
 		if _, ok := m.selected(); ok {
 			m.openPane(paneInstructions)
@@ -729,32 +900,17 @@ func (m Model) runSkillAction(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "v":
 		return m, m.openDiff()
-	case "m", "p":
-		item, ok := m.selected()
-		if !ok {
-			return m, nil
-		}
-		if item.Inherited || item.ReadOnly || !item.Managed {
-			m.setNotice(noticeWarning, "Only a library skill owned by this scope can be transferred.")
-			return m, nil
-		}
-		m.transferAction = map[string]string{"m": "move", "p": "copy"}[key]
-		m.transferItem = item.ID
-		m.transferInput = ""
-		if m.service.Config.Project != "" {
-			m.transferInput = "global"
-		} else if m.project != "" {
-			m.transferInput = m.project
-		}
-		m.setNotice(noticeInfo, "Enter global or a project directory, then press Enter to review.")
-		return m, nil
 	case "o":
 		item, ok := m.selected()
-		if !ok || !item.Inherited {
+		if !ok || !item.Inherited && !item.Installed {
 			m.setNotice(noticeWarning, "The selected skill is already in its owning scope.")
 			return m, nil
 		}
-		service, err := manager.New(manager.Config{Home: m.service.Config.Home, DataHome: m.service.Config.DataHome, ConfigHome: m.service.Config.ConfigHome, Project: item.OwnerProject})
+		owner := item.OwnerProject
+		if item.Installed {
+			owner = ""
+		}
+		service, err := manager.New(manager.Config{Home: m.service.Config.Home, DataHome: m.service.Config.DataHome, ConfigHome: m.service.Config.ConfigHome, Project: owner})
 		if err != nil {
 			m.setNotice(noticeError, failureNotice("owner", err))
 			return m, nil
@@ -812,26 +968,54 @@ func (m Model) runSkillAction(key string) (tea.Model, tea.Cmd) {
 		s := m.service
 		m.busy = true
 		return m, func() tea.Msg {
-			p, e := s.Preview(action, arg)
+			p, e := s.PreviewOperation(manager.OperationRequest{Action: action, Arguments: []string{arg}})
 			return previewMsg{p, e, action == "adopt" || action == "resolve" || action == "restore"}
 		}
 	}
 	return m, nil
 }
 
-func (m Model) runRemoteCommand(args ...string) (tea.Model, tea.Cmd) {
-	path, err := os.Executable()
-	if err != nil {
-		m.setNotice(noticeError, sanitizeNotice(err))
+func (m Model) discoverRemote(url string) tea.Cmd {
+	s := m.service
+	return func() tea.Msg {
+		candidates, err := s.DiscoverRemote(url)
+		return remoteFoundMsg{candidates: candidates, url: url, err: err}
+	}
+}
+
+func (m Model) prepareRemoteSelection() (tea.Model, tea.Cmd) {
+	var names []string
+	for _, candidate := range m.remoteChoices {
+		if m.remoteSelected[candidate.Name] {
+			names = append(names, candidate.Name)
+		}
+	}
+	if len(names) == 0 {
+		m.setNotice(noticeWarning, "Select at least one skill.")
 		return m, nil
 	}
-	command := exec.Command(path, args...)
-	command.Env = os.Environ()
-	return m, tea.ExecProcess(command, func(err error) tea.Msg { return remoteDoneMsg{err: err} })
+	s, url := m.service, m.remoteURL
+	m.busy = true
+	return m, func() tea.Msg {
+		plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: []string{url}, Skills: names})
+		return remotePreviewMsg{plan: plan, err: err}
+	}
+}
+
+func (m Model) prepareRemoteUpdate(id string, replace bool) (tea.Model, tea.Cmd) {
+	s := m.service
+	m.busy = true
+	return m, func() tea.Msg {
+		plan, err := s.PreviewOperation(manager.OperationRequest{Action: "update", Arguments: []string{id}, Replace: replace})
+		return remotePreviewMsg{plan: plan, err: err}
+	}
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.width < 30 || m.height < 10 {
+		return m, nil
+	}
+	if m.groupMenu || m.remoteMenu {
 		return m, nil
 	}
 	if m.busy {
@@ -884,14 +1068,14 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if msg.Button == tea.MouseButtonWheelUp {
 			delta = -3
 		}
-		if m.pending != nil || m.pendingBatch != nil || m.pendingTransfer != nil || !m.mouseInList(msg.X, msg.Y) {
+		if m.pending != nil || !m.mouseInList(msg.X, msg.Y) {
 			m.offset = max(0, m.offset+delta)
 			return m, nil
 		}
 		m.cursor = min(max(0, m.cursor+delta), max(0, len(m.rows())-1))
 		return m, m.selection()
 	}
-	if m.pending != nil || m.pendingBatch != nil || m.pendingTransfer != nil || m.transferAction != "" {
+	if m.pending != nil {
 		if msg.Y == m.height-1 {
 			if key := m.footerKeyAt(msg.X); key != "" {
 				return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})

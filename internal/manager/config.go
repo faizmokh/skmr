@@ -27,7 +27,23 @@ func Environment(project string) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return New(Config{Home: home, DataHome: os.Getenv("XDG_DATA_HOME"), ConfigHome: os.Getenv("XDG_CONFIG_HOME"), Project: project})
+	s, err := New(Config{Home: home, DataHome: os.Getenv("XDG_DATA_HOME"), ConfigHome: os.Getenv("XDG_CONFIG_HOME"), Project: project})
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// DefaultEnvironment uses the nearest Git project when no scope was selected.
+func DefaultEnvironment(project string, global bool) (*Service, error) {
+	if project == "" && !global {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		project = gitRoot(cwd)
+	}
+	return Environment(project)
 }
 
 func New(c Config) (*Service, error) {
@@ -121,7 +137,7 @@ func (s *Service) Shared() string {
 	return filepath.Join(base, ".agents", "skills")
 }
 func (s *Service) hasPending() bool {
-	return !absent(filepath.Join(s.Store, "journal.json")) || !absent(filepath.Join(s.Store, "batch.json")) || !absent(filepath.Join(s.Store, "transfer.json")) || !absent(filepath.Join(s.Store, "packages-journal.json")) || !absent(filepath.Join(s.Store, "remote-journal.json"))
+	return !absent(s.operationPath()) || !absent(filepath.Join(s.Store, "journal.json")) || !absent(filepath.Join(s.Store, "delete-journal.json")) || !absent(filepath.Join(s.Store, "batch.json")) || !absent(filepath.Join(s.Store, "transfer.json")) || !absent(filepath.Join(s.Store, "packages-journal.json")) || !absent(filepath.Join(s.Store, "remote-journal.json")) || !absent(s.remoteAddJournalPath()) || !absent(s.upgradePath())
 }
 func within(root, path string) bool {
 	rel, err := filepath.Rel(root, path)

@@ -312,6 +312,6 @@ func (m Model) batchReviewView(width, height int) string {
 		warningStyle.Render("Review every filesystem change before applying."),
 		"",
 	}
-	lines = append(lines, wrap(terminal.Safe(m.pendingBatch.String()), max(1, width-4))...)
+	lines = append(lines, wrap(terminal.Safe(m.pending.String()), max(1, width-4))...)
 	return scrollFrame("Confirm add skills", lines, width, height, m.offset, true)
 }
