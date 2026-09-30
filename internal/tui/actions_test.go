@@ -82,20 +82,14 @@ func TestDeleteActionReviewsAndApplies(t *testing.T) {
 	if !ok {
 		t.Fatal("no selected skill")
 	}
-	disable, err := m.service.Preview("disable", selected.ID)
-	if err != nil {
-		t.Fatal(err)
+	if !selected.Enabled {
+		t.Fatal("test requires a globally enabled skill")
 	}
-	if err := m.service.Apply(disable); err != nil {
-		t.Fatal(err)
-	}
-	next, _ := m.Update(m.load()())
-	m = next.(Model)
 	m, cmd := actionKey(m, "D")
 	if cmd == nil || !m.busy {
 		t.Fatal("delete action did not prepare preview")
 	}
-	next, _ = m.Update(cmd())
+	next, _ := m.Update(cmd())
 	m = next.(Model)
 	if m.pending == nil || !strings.Contains(ansi.Strip(m.View()), "Permanently delete") {
 		t.Fatal("deletion review was not shown")

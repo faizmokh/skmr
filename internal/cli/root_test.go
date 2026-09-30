@@ -124,21 +124,18 @@ func TestDeleteCommandRequiresReview(t *testing.T) {
 	if _, err := run("add", path, "--global", "--yes"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run("delete", id, "--dry-run"); err == nil || !strings.Contains(err.Error(), "disable the global placement") {
-		t.Fatal("globally placed skill was eligible for deletion", err)
-	}
-	if _, err := run("disable", id); err != nil {
-		t.Fatal(err)
-	}
 	library := filepath.Join(os.Getenv("XDG_DATA_HOME"), "skmr", "library", id, "sample")
 	out, err := run("delete", id, "--dry-run")
 	if err != nil || !strings.Contains(out, "Permanently delete ") || !strings.Contains(out, path) {
 		t.Fatalf("bad preview: %q %v", out, err)
 	}
+	if !exists(path) || !exists(library) {
+		t.Fatal("dry run changed the enabled skill or its global link")
+	}
 	if _, err := run("delete", id); err == nil || !strings.Contains(err.Error(), "--yes") || !exists(library) {
 		t.Fatal("noninteractive deletion did not require confirmation", err)
 	}
-	if _, err := run("delete", id, "--yes"); err != nil || exists(library) {
+	if _, err := run("delete", id, "--yes"); err != nil || exists(library) || exists(path) {
 		t.Fatal("deletion failed", err)
 	}
 }

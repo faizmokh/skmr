@@ -99,9 +99,6 @@ func (s *Service) PreviewDelete(id string) (DeletePlan, error) {
 				return DeletePlan{}, fmt.Errorf("managed link was replaced: %s", link)
 			}
 		}
-		if s.Config.Project == "" && p.Record.Enabled {
-			return DeletePlan{}, fmt.Errorf("disable the global placement before deleting %s", p.Name)
-		}
 		p.Source = filepath.Dir(p.Record.Library)
 	} else {
 		p.Source = selected.Path

@@ -41,9 +41,7 @@ func actionsForSkill(skill skills.Skill) []skillAction {
 		if !skill.Remote && skill.SourcePath == "" {
 			actions = append(actions, skillAction{key: "r", label: "Return to origin", event: "r"})
 		}
-		if !skill.Enabled {
-			actions = append(actions, skillAction{key: "D", label: "Permanently delete", event: "D"})
-		}
+		actions = append(actions, skillAction{key: "D", label: "Permanently delete", event: "D"})
 	} else if skill.ConflictID == "" && len(skill.Issues) == 0 {
 		actions = append(actions, skillAction{key: "a", label: "Add to library", event: "a"})
 	}

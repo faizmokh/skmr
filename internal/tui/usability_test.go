@@ -242,7 +242,7 @@ func TestActionDefinitionsDrivePickerAndFooter(t *testing.T) {
 	}{
 		{"outside", skills.Skill{}, []string{"i", "a"}},
 		{"managed", skills.Skill{Managed: true}, []string{"i", "e", "r", "D"}},
-		{"enabled", skills.Skill{Managed: true, Enabled: true}, []string{"i", "d", "r"}},
+		{"enabled", skills.Skill{Managed: true, Enabled: true}, []string{"i", "d", "r", "D"}},
 		{"copies", skills.Skill{ConflictID: "copies"}, []string{"i", "c"}},
 		{"parent", skills.Skill{Inherited: true}, []string{"i", "o"}},
 		{"view only", skills.Skill{ReadOnly: true}, []string{"i"}},
