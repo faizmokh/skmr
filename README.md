@@ -1,6 +1,6 @@
 # skmr
 
-A local skill manager for Codex, OpenCode, and Pi. Keep skills in one personal library and make them available globally or per project.
+Manage skills for Codex, OpenCode, and Pi from one personal library.
 
 ## Install
 
@@ -14,56 +14,45 @@ Or with Go 1.25+:
 go install github.com/faizmokh/skmr/cmd/skmr@latest
 ```
 
-## Quick start
+## Use
 
-Run `skmr` for the TUI (`?` for help), or use the CLI:
+Run `skmr` for the interactive library (`?` for help), or use the CLI:
 
 ```sh
-skmr list                              # discover skills
-skmr add /path/to/my-skill --global     # store a local skill and enable it globally
-skmr disable my-skill                  # keep it in the library, hide it globally
-skmr enable my-skill                   # enable it globally again
+skmr add /path/to/my-skill             # store in the library
+skmr add https://github.com/owner/repo --skill my-skill
+skmr list
+skmr enable my-skill                  # make available globally
+skmr disable my-skill                 # keep in library, hide globally
+skmr update my-skill                  # refresh a remote skill
+```
 
-cd my-project
-skmr add my-skill                      # install a library skill in this project
-skmr remove my-skill                   # remove it from this project
+`add` defaults to the library, wherever you run it. New skills stay disabled; existing skills keep their activation and placements. Use `--global` to add and enable in one step. Remote skills require Node.js and a network connection; GitHub and skills.sh URLs are supported.
+
+To install into a project:
+
+```sh
+skmr add my-skill --project auto       # nearest Git project
+skmr remove my-skill                  # remove from nearest Git project
 skmr sync                             # repair project links
 ```
 
-Project commands use the nearest Git root. Use `--project <path>` to target another folder or a project outside Git. Use `--dry-run` to preview changes.
+Use `--project <path>` for another folder or a project outside Git. Use `--dry-run` to preview changes.
 
-Opening a scope automatically moves unambiguous writable skills into the library. Built-in and plugin skills stay view-only.
-
-## Remote skills
-
-Requires Node.js and a network connection.
-
-```sh
-skmr search "react testing"
-skmr add https://skills.sh/vercel-labs/skills/find-skills --global
-skmr update find-skills
-```
-
-GitHub URLs and skills.sh packs also work. Use `--skill <name>` to select a skill from a repository or pack.
-
-## Groups
+Groups are reusable presets:
 
 ```sh
 skmr group create web skill-one skill-two
-skmr add @web
+skmr add @web --project auto
 ```
 
-Groups are presets: later group changes do not affect installed project skills.
+Changing a group does not change existing project installations.
 
-## Troubleshooting
+## Help
 
-```sh
-skmr doctor
-skmr doctor --recover   # finish an interrupted operation
-skmr --help            # all commands and flags
-```
+Use `skmr search "query"` to find remote skills, `skmr doctor` to check problems, and `skmr doctor --recover` to resume an interrupted operation. Run `skmr --help` for all commands.
 
-Skills live in `~/.local/share/skmr` (or `$XDG_DATA_HOME/skmr`). Projects save their requests in `.skmr/packages.json` and link skills through `.agents/skills`.
+Skills live in `~/.local/share/skmr` (or `$XDG_DATA_HOME/skmr`). Projects track requests in `.skmr/packages.json` and link skills through `.agents/skills`. Discovered writable skills are automatically adopted into the library; built-in and plugin skills stay view-only.
 
 ## Development
 

@@ -17,6 +17,8 @@ type OperationRequest struct {
 	Arguments []string
 	Skills    []string
 	Replace   bool
+	// LibraryOnly stores additions without changing activation or project placements.
+	LibraryOnly bool
 }
 
 func (s *Service) PreviewOperation(r OperationRequest) (OperationPlan, error) {
@@ -25,6 +27,12 @@ func (s *Service) PreviewOperation(r OperationRequest) (OperationPlan, error) {
 	}
 	switch r.Action {
 	case "add":
+		if r.LibraryOnly {
+			if s.Config.Project != "" {
+				return OperationPlan{}, fmt.Errorf("library-only additions require the personal scope")
+			}
+			return s.previewLibraryAdd(r)
+		}
 		if len(r.Arguments) == 0 {
 			return OperationPlan{}, fmt.Errorf("provide a skill, local path, URL, or @group")
 		}
@@ -578,5 +586,115 @@ func (s *Service) previewProjectAdoption(paths []string) (OperationPlan, error) 
 	if err := preflightOperation(op); err != nil {
 		return op, err
 	}
+	return op, nil
+}
+
+// previewLibraryAdd keeps storage separate from activation for CLI library additions.
+func (s *Service) previewLibraryAdd(r OperationRequest) (OperationPlan, error) {
+	if len(r.Arguments) == 0 {
+		return OperationPlan{}, fmt.Errorf("provide a skill, local path, URL, or @group")
+	}
+	if len(r.Arguments) == 1 && strings.Contains(r.Arguments[0], "://") {
+		if len(r.Skills) == 0 {
+			return OperationPlan{}, fmt.Errorf("select at least one remote skill")
+		}
+		p, err := s.prepareRemoteLibrary(r.Arguments[0], r.Skills)
+		if err != nil {
+			return OperationPlan{}, err
+		}
+		op, err := s.operationFromRemote(p.Remote)
+		if err != nil {
+			p.Cleanup()
+			return op, err
+		}
+		op.Action = "add"
+		op.Description = p.Remote.String()
+		for _, name := range p.Reused {
+			op.Description += "\nAlready in personal library: " + name
+		}
+		op.Temporary = []string{p.Remote.Stage}
+		return op, nil
+	}
+	if len(r.Skills) > 0 {
+		return OperationPlan{}, fmt.Errorf("--skill requires exactly one remote URL")
+	}
+	before, err := s.load()
+	if err != nil {
+		return OperationPlan{}, err
+	}
+	if len(r.Arguments) == 1 && localArgument(r.Arguments[0]) {
+		absolute, err := filepath.Abs(r.Arguments[0])
+		if err != nil {
+			return OperationPlan{}, err
+		}
+		for _, record := range before.Records {
+			if absolute == record.Library || absolute == record.ImportedFrom || absolute == record.Original || owned(absolute, record.Library) {
+				op := operationPlan("add", "Already in personal library: "+record.Name)
+				op.Scopes = []OperationScope{{LibraryBefore: &before, LibraryAfter: &before}}
+				return op, nil
+			}
+		}
+		op, err := s.previewLocalPlacement(absolute)
+		if err != nil {
+			return op, err
+		}
+		op.AddLinks = nil
+		for i := range op.Scopes {
+			if op.Scopes[i].LibraryAfter != nil {
+				for j := range op.Scopes[i].LibraryAfter.Records {
+					op.Scopes[i].LibraryAfter.Records[j].Enabled = false
+					// Existing records retain their activation state.
+					for _, old := range before.Records {
+						if old.ID == op.Scopes[i].LibraryAfter.Records[j].ID {
+							op.Scopes[i].LibraryAfter.Records[j].Enabled = old.Enabled
+						}
+					}
+				}
+			}
+		}
+		op.Description = "Store disabled in personal library"
+		for _, change := range op.Content {
+			op.Description += "\n" + change.Kind + " " + change.From + "\n  to " + change.To
+		}
+		return op, nil
+	}
+	groups, err := s.loadGroups()
+	if err != nil {
+		return OperationPlan{}, err
+	}
+	var names []string
+	for _, arg := range r.Arguments {
+		if !strings.HasPrefix(arg, "@") {
+			names = append(names, arg)
+			continue
+		}
+		found := false
+		for _, group := range groups.Groups {
+			if "@"+group.Name == arg {
+				names = append(names, group.Members...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return OperationPlan{}, fmt.Errorf("group %s was not found", arg)
+		}
+	}
+	op := operationPlan("add", "")
+	op.Scopes = []OperationScope{{LibraryBefore: &before, LibraryAfter: &before, GroupsBefore: &groups, GroupsAfter: &groups}}
+	for _, name := range uniqueStrings(names) {
+		found := false
+		for _, record := range before.Records {
+			if record.ID == name || record.Name == name {
+				op.Description += "Already in personal library: " + record.Name + "\n"
+				found = true
+				break
+			}
+		}
+		if !found {
+			return OperationPlan{}, fmt.Errorf("skill %q is not in the personal library", name)
+		}
+	}
+	op.Description = strings.TrimSpace(op.Description)
 	return op, nil
 }

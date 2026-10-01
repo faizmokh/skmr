@@ -54,7 +54,7 @@ func New(build BuildInfo) *cobra.Command {
 		if name == "update" || name == "enable" || name == "disable" || name == "restore" || name == "delete" {
 			target = ""
 		}
-		if (name == "add" || name == "remove" || name == "sync") && !global && target == "" {
+		if (name == "remove" || name == "sync") && !global && target == "" {
 			target = "auto"
 		}
 		s, err := manager.Environment(target)
@@ -485,7 +485,7 @@ func New(build BuildInfo) *cobra.Command {
 		var selected []string
 		use := action + " <skill|@group>..."
 		short := map[string]string{
-			"add":    "Add library or remote skills to the current project",
+			"add":    "Store skills in the personal library; use --global or --project to install",
 			"remove": "Remove direct skill or group requests from the current project",
 			"sync":   "Reconcile current-project skills with its package manifest",
 		}[action]
@@ -517,8 +517,8 @@ func New(build BuildInfo) *cobra.Command {
 			if action == "add" && len(args) == 0 {
 				return fmt.Errorf("provide a skill name, group, or GitHub/skills.sh URL")
 			}
-			if global {
-				return runGlobalPlacement(cmd, action, args, selected, dry, yes)
+			if global || action == "add" && project == "" {
+				return runPersonalPlacement(cmd, action, args, selected, dry, yes, action == "add" && !global)
 			}
 			s, err := packageService()
 			if err != nil {
@@ -703,7 +703,7 @@ func New(build BuildInfo) *cobra.Command {
 	return root
 }
 
-func runGlobalPlacement(cmd *cobra.Command, action string, args, selected []string, dry, yes bool) error {
+func runPersonalPlacement(cmd *cobra.Command, action string, args, selected []string, dry, yes, libraryOnly bool) error {
 	if action == "sync" {
 		return fmt.Errorf("sync requires a project")
 	}
@@ -742,7 +742,7 @@ func runGlobalPlacement(cmd *cobra.Command, action string, args, selected []stri
 				}
 			}
 		}
-		plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: args, Skills: choices})
+		plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: args, Skills: choices, LibraryOnly: libraryOnly})
 		if err != nil {
 			return err
 		}
@@ -751,20 +751,29 @@ func runGlobalPlacement(cmd *cobra.Command, action string, args, selected []stri
 		if dry {
 			return nil
 		}
-		if err = confirmCLI(cmd, yes, "Add and enable these skills globally?"); err != nil {
+		prompt := "Add and enable these skills globally?"
+		if libraryOnly {
+			prompt = "Add these skills to the personal library?"
+		}
+		if err = confirmCLI(cmd, yes, prompt); err != nil {
 			return err
 		}
 		if err = s.ApplyOperation(plan); err != nil {
 			return err
 		}
 
+		if libraryOnly {
+			fmt.Fprintln(cmd.OutOrStdout(), "Done: skills are in the personal library.")
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "Done: skills enabled globally.")
+		}
 		return nil
 	}
 	if len(selected) > 0 {
 		return fmt.Errorf("--skill requires one remote URL")
 	}
 	if len(args) == 1 && action == "add" && looksLikePath(args[0]) {
-		plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: args})
+		plan, err := s.PreviewOperation(manager.OperationRequest{Action: "add", Arguments: args, LibraryOnly: libraryOnly})
 		if err != nil {
 			return err
 		}
@@ -773,15 +782,29 @@ func runGlobalPlacement(cmd *cobra.Command, action string, args, selected []stri
 		if dry {
 			return nil
 		}
-		if err = confirmCLI(cmd, yes, "Add this skill to the library?"); err != nil {
+		prompt := "Add and enable this skill globally?"
+		if libraryOnly {
+			prompt = "Add this skill to the personal library?"
+		}
+		if err = confirmCLI(cmd, yes, prompt); err != nil {
 			return err
 		}
-		return s.ApplyOperation(plan)
+		if err := s.ApplyOperation(plan); err != nil {
+			return err
+		}
+		if action == "add" {
+			if libraryOnly {
+				fmt.Fprintln(cmd.OutOrStdout(), "Done: skills are in the personal library.")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "Done: skills enabled globally.")
+			}
+		}
+		return nil
 	}
 	if action == "remove" && len(args) == 0 {
 		return fmt.Errorf("provide at least one skill")
 	}
-	plan, err := s.PreviewOperation(manager.OperationRequest{Action: action, Arguments: args})
+	plan, err := s.PreviewOperation(manager.OperationRequest{Action: action, Arguments: args, LibraryOnly: libraryOnly})
 	if err != nil {
 		return err
 	}
@@ -790,7 +813,17 @@ func runGlobalPlacement(cmd *cobra.Command, action string, args, selected []stri
 	if dry {
 		return nil
 	}
-	return s.ApplyOperation(plan)
+	if err := s.ApplyOperation(plan); err != nil {
+		return err
+	}
+	if action == "add" {
+		if libraryOnly {
+			fmt.Fprintln(cmd.OutOrStdout(), "Done: skills are in the personal library.")
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "Done: skills enabled globally.")
+		}
+	}
+	return nil
 }
 
 func looksLikePath(value string) bool {

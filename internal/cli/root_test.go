@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,13 +179,48 @@ printf '\n]\n'
 	if _, err := run("add", url, "--project", project); err == nil || !strings.Contains(err.Error(), "--skill") {
 		t.Fatalf("multiple skills did not require selection: %v", err)
 	}
+
+	for _, inGit := range []bool{false, true} {
+		cwd := filepath.Join(os.Getenv("HOME"), "remote-outside")
+		if inGit {
+			cwd = filepath.Join(os.Getenv("HOME"), "remote-repo")
+		}
+		if err := os.MkdirAll(cwd, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if inGit {
+			if err := os.Mkdir(filepath.Join(cwd, ".git"), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Chdir(cwd)
+		if _, err := run("add", url); err == nil || !strings.Contains(err.Error(), "--skill") {
+			t.Fatal("selection should be required", err)
+		}
+		out, err := run("install", url, "--skill", "alpha", "--dry-run")
+		if err != nil || strings.Contains(out, "Create link") {
+			t.Fatal(out, err)
+		}
+		if _, err := run("add", url, "--skill", "alpha"); err == nil || !strings.Contains(err.Error(), "--yes") {
+			t.Fatal("confirmation should be required", err)
+		}
+		if _, err := run("add", url, "--skill", "alpha", "--yes"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(cwd, ".skmr")); !os.IsNotExist(err) {
+			t.Fatal("library add created project state", err)
+		}
+		if _, err := os.Lstat(filepath.Join(os.Getenv("HOME"), ".agents", "skills", "alpha")); !os.IsNotExist(err) {
+			t.Fatal("library add enabled remote skill", err)
+		}
+	}
 	manifestPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "skmr", "manifest.json")
 	beforePreview, err := os.ReadFile(manifestPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	out, err := run("add", url, "--project", project, "--skill", "alpha", "--dry-run")
-	if err != nil || !strings.Contains(out, "Store disabled") || !strings.Contains(out, "Create link") {
+	if err != nil || !strings.Contains(out, "Reuse alpha") || !strings.Contains(out, "Create link") {
 		t.Fatalf("add preview: %q, %v", out, err)
 	}
 	afterPreview, err := os.ReadFile(manifestPath)
@@ -229,6 +265,21 @@ printf '\n]\n'
 	}
 	if _, err = run("add", url, "--global", "--skill", "alpha", "--yes"); err != nil {
 		t.Fatal("global remote add did not reuse content", err)
+	}
+
+	beforeReuse, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run("add", url, "--skill", "alpha", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	afterReuse, err := os.ReadFile(manifestPath)
+	if err != nil || !bytes.Equal(beforeReuse, afterReuse) {
+		t.Fatal("library reuse changed enabled remote skill", err)
+	}
+	if _, err := os.Readlink(filepath.Join(os.Getenv("HOME"), ".agents", "skills", "alpha")); err != nil {
+		t.Fatal("library reuse removed global link", err)
 	}
 	if _, err = run("remove", "alpha", "--global"); err != nil {
 		t.Fatal(err)
@@ -460,7 +511,7 @@ func TestVersion(t *testing.T) {
 	}
 }
 
-func TestAddGroupUsesCurrentGitProject(t *testing.T) {
+func TestAddGroupUsesExplicitAutoProject(t *testing.T) {
 	source := setup(t)
 	if _, err := run("adopt", source, "--yes"); err != nil {
 		t.Fatal(err)
@@ -483,7 +534,7 @@ func TestAddGroupUsesCurrentGitProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(old) })
-	out, err := run("add", "@backend")
+	out, err := run("add", "@backend", "--project", "auto")
 	if err != nil || !strings.Contains(out, "project now has 1 skills") {
 		t.Fatalf("group add failed: %s %v", out, err)
 	}
@@ -503,7 +554,7 @@ func TestAddGroupUsesCurrentGitProject(t *testing.T) {
 	}
 }
 
-func TestAddRequiresGitOrExplicitProject(t *testing.T) {
+func TestLibraryAddWorksOutsideGit(t *testing.T) {
 	source := setup(t)
 	if _, err := run("adopt", source, "--yes"); err != nil {
 		t.Fatal(err)
@@ -517,8 +568,11 @@ func TestAddRequiresGitOrExplicitProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(old) })
-	if _, err = run("add", "sample"); err == nil || !strings.Contains(err.Error(), "outside Git") {
-		t.Fatal("add outside Git did not require --project", err)
+	if out, err := run("add", "sample"); err != nil || !strings.Contains(out, "Already in personal library") {
+		t.Fatal("library add outside Git failed", out, err)
+	}
+	if _, err = run("add", "sample", "--project", "auto"); err == nil || !strings.Contains(err.Error(), "outside Git") {
+		t.Fatal("explicit auto project should require Git", err)
 	}
 }
 
@@ -645,5 +699,98 @@ func TestAdoptAllWithNoSafeSkills(t *testing.T) {
 	out, err := run("adopt", "--all")
 	if err != nil || !strings.Contains(out, "No safe unmanaged skills to add.") {
 		t.Fatalf("unexpected empty --all result: %s %v", out, err)
+	}
+}
+
+func TestLibraryLocalAddAndExistingRequests(t *testing.T) {
+	for _, inGit := range []bool{false, true} {
+		t.Run(fmt.Sprint(inGit), func(t *testing.T) {
+			setup(t)
+			cwd := filepath.Join(os.Getenv("HOME"), "working")
+			if err := os.MkdirAll(cwd, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if inGit {
+				if err := os.Mkdir(filepath.Join(cwd, ".git"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(cwd)
+			source := filepath.Join(os.Getenv("HOME"), "author", "local")
+			if err := os.MkdirAll(source, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte("---\nname: local\ndescription: Example\n---\nBody\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := run("add", source, "--dry-run"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := run("add", source); err == nil || !strings.Contains(err.Error(), "--yes") {
+				t.Fatal("confirmation missing", err)
+			}
+			if _, err := run("install", source, "--yes"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(source, "SKILL.md")); err != nil {
+				t.Fatal("author source lost", err)
+			}
+			if _, err := os.Lstat(filepath.Join(os.Getenv("HOME"), ".agents", "skills", "local")); !os.IsNotExist(err) {
+				t.Fatal("local skill enabled", err)
+			}
+			if _, err := run("group", "create", "local-group", "local"); err != nil {
+				t.Fatal(err)
+			}
+			manifest := filepath.Join(os.Getenv("XDG_DATA_HOME"), "skmr", "manifest.json")
+			for _, enabled := range []bool{false, true} {
+				if enabled {
+					if _, err := run("enable", "local"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := os.ReadFile(manifest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, err := run("list", "--global", "--json")
+				if err != nil {
+					t.Fatal(err)
+				}
+				var result skills.Result
+				if err := json.Unmarshal([]byte(out), &result); err != nil {
+					t.Fatal(err)
+				}
+				id := ""
+				for _, skill := range result.Skills {
+					if skill.Name == "local" {
+						id = skill.ID
+						if skill.Enabled != enabled {
+							t.Fatal("wrong enabled state")
+						}
+					}
+				}
+				for _, arg := range []string{source, "local", id, "@local-group"} {
+					if _, err := run("add", arg, "--yes"); err != nil {
+						t.Fatal(arg, err)
+					}
+				}
+				after, err := os.ReadFile(manifest)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatal("repeated addition changed library", err)
+				}
+			}
+			if _, err := run("add", "unknown"); err == nil {
+				t.Fatal("unknown name accepted")
+			}
+			if _, err := run("add", "local", "--skill", "local"); err == nil {
+				t.Fatal("invalid selection accepted")
+			}
+			if _, err := os.Lstat(filepath.Join(cwd, ".skmr")); !os.IsNotExist(err) {
+				t.Fatal("project state created", err)
+			}
+			if _, err := os.Lstat(filepath.Join(cwd, ".agents")); !os.IsNotExist(err) {
+				t.Fatal("project links created", err)
+			}
+		})
 	}
 }

@@ -501,3 +501,39 @@ func TestProjectUpgradeAndReturnPreserveResolvedDuplicateCopies(t *testing.T) {
 		t.Fatal("duplicate copy was not returned intact", err)
 	}
 }
+
+func TestLibraryOnlyAddPreservesExistingPlacements(t *testing.T) {
+	global, path := fixture(t)
+	plan := requireOperation(t, global, OperationRequest{Action: "add", Arguments: []string{path}, LibraryOnly: true})
+	if len(plan.AddLinks) != 0 {
+		t.Fatal("library-only adoption planned activation links")
+	}
+	if err := global.ApplyOperation(plan); err != nil {
+		t.Fatal(err)
+	}
+	library, err := global.load()
+	if err != nil || len(library.Records) != 1 || library.Records[0].Enabled {
+		t.Fatal("library-only adoption did not store a disabled skill", err)
+	}
+	record := library.Records[0]
+	project := projectService(t, global, "library-placement")
+	placement := requireOperation(t, project, OperationRequest{Action: "add", Arguments: []string{record.Name}})
+	if err := project.ApplyOperation(placement); err != nil {
+		t.Fatal(err)
+	}
+	for _, argument := range []string{record.Name, record.ID, record.Library, path} {
+		repeated := requireOperation(t, global, OperationRequest{Action: "add", Arguments: []string{argument}, LibraryOnly: true})
+		if len(repeated.Content) != 0 || len(repeated.AddLinks) != 0 || len(repeated.RemoveLinks) != 0 {
+			t.Fatal("repeated library addition planned changes")
+		}
+		if err := global.ApplyOperation(repeated); err != nil {
+			t.Fatal(err)
+		}
+		if !owned(filepath.Join(project.Shared(), record.Name), record.Library) {
+			t.Fatal("repeated addition changed project placement")
+		}
+	}
+	if _, err := project.PreviewOperation(OperationRequest{Action: "add", Arguments: []string{record.Name}, LibraryOnly: true}); err == nil {
+		t.Fatal("library-only option accepted a project scope")
+	}
+}
